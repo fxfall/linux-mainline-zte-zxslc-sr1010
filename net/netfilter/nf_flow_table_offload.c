@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/kernel.h>
+#include <linux/seq_file.h>
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/netfilter.h>
@@ -16,6 +17,12 @@
 #include <net/netfilter/nf_conntrack_tuple.h>
 
 #define NF_FLOW_RULE_ACTION_MAX	24
+#define NF_FLOW_HW_RETRY_MAX_SHIFT 5
+
+struct nf_flow_hw_result {
+	int error;
+	char reason[NF_FLOW_HW_REASON_LEN];
+};
 
 static struct workqueue_struct *nf_flow_offload_add_wq;
 static struct workqueue_struct *nf_flow_offload_del_wq;
@@ -797,7 +804,8 @@ EXPORT_SYMBOL_GPL(nf_flow_rule_route_ipv6);
 static struct nf_flow_rule *
 nf_flow_offload_rule_alloc(struct net *net,
 			   const struct flow_offload_work *offload,
-			   enum flow_offload_tuple_dir dir)
+			   enum flow_offload_tuple_dir dir,
+			   struct nf_flow_hw_result *result)
 {
 	const struct nf_flowtable *flowtable = offload->flowtable;
 	const struct flow_offload_tuple *tuple, *other_tuple;
@@ -806,6 +814,7 @@ nf_flow_offload_rule_alloc(struct net *net,
 	struct nf_flow_rule *flow_rule;
 	int err = -ENOMEM;
 
+	strscpy(result->reason, "cannot allocate hardware rule", sizeof(result->reason));
 	flow_rule = kzalloc_obj(*flow_rule);
 	if (!flow_rule)
 		goto err_flow;
@@ -824,12 +833,22 @@ nf_flow_offload_rule_alloc(struct net *net,
 		other_dst = other_tuple->dst_cache;
 
 	err = nf_flow_rule_match(&flow_rule->match, tuple, other_dst);
-	if (err < 0)
+	if (err < 0) {
+		strscpy(result->reason, "cannot construct hardware match",
+			sizeof(result->reason));
 		goto err_flow_match;
+	}
 
 	flow_rule->rule->action.num_entries = 0;
-	if (flowtable->type->action(net, flow, dir, flow_rule) < 0)
+	err = flowtable->type->action(net, flow, dir, flow_rule);
+	if (err < 0) {
+		/* Some route builders return -1 for unresolved neighbour data. */
+		if (err == -1)
+			err = -EAGAIN;
+		strscpy(result->reason, "cannot resolve hardware actions",
+			sizeof(result->reason));
 		goto err_flow_match;
+	}
 
 	return flow_rule;
 
@@ -838,7 +857,8 @@ err_flow_match:
 err_flow_rule:
 	kfree(flow_rule);
 err_flow:
-	return NULL;
+	result->error = err;
+	return ERR_PTR(err);
 }
 
 static void __nf_flow_offload_destroy(struct nf_flow_rule *flow_rule)
@@ -857,33 +877,58 @@ static void __nf_flow_offload_destroy(struct nf_flow_rule *flow_rule)
 	kfree(flow_rule);
 }
 
-static void nf_flow_offload_destroy(struct nf_flow_rule *flow_rule[])
+#ifdef CONFIG_NF_FLOW_TABLE_CLIENT_STATS
+static void nf_flow_stats_scope_get(const struct flow_stats_scope *scope)
 {
-	int i;
-
-	for (i = 0; i < FLOW_OFFLOAD_DIR_MAX; i++)
-		__nf_flow_offload_destroy(flow_rule[i]);
+	nf_flow_clients_scope_get(scope->owner);
+	__module_get(THIS_MODULE);
 }
 
-static int nf_flow_offload_alloc(const struct flow_offload_work *offload,
-				 struct nf_flow_rule *flow_rule[])
+static void nf_flow_stats_scope_put(const struct flow_stats_scope *scope)
 {
-	struct net *net = read_pnet(&offload->flowtable->net);
+	nf_flow_clients_scope_put(scope->owner);
+	module_put(THIS_MODULE);
+}
 
-	flow_rule[0] = nf_flow_offload_rule_alloc(net, offload,
-						  FLOW_OFFLOAD_DIR_ORIGINAL);
-	if (!flow_rule[0])
-		return -ENOMEM;
+static void nf_flow_stats_scope_account(const struct flow_stats_scope *scope,
+				      u64 packets, u64 bytes)
+{
+	struct net *net;
+	int d;
 
-	flow_rule[1] = nf_flow_offload_rule_alloc(net, offload,
-						  FLOW_OFFLOAD_DIR_REPLY);
-	if (!flow_rule[1]) {
-		__nf_flow_offload_destroy(flow_rule[0]);
-		return -ENOMEM;
+	/* Aggregate endpoint bytes never enter an arbitrary Conntrack record. */
+	nf_flow_clients_account_scope(scope->src, scope->dst, bytes);
+	rcu_read_lock();
+	net = nf_flow_clients_scope_net(scope->owner);
+	if (!net)
+		goto unlock;
+	for (d = 0; d < 2; d++) {
+		struct pcpu_sw_netstats *tstats;
+		struct net_device *dev;
+		u32 lower = scope->path[d * 2], upper = scope->path[d * 2 + 1];
+
+		if (!upper || upper == lower)
+			continue;
+		dev = dev_get_by_index_rcu(net, upper);
+		if (!dev || dev->pcpu_stat_type != NETDEV_PCPU_STAT_TSTATS)
+			continue;
+		local_bh_disable();
+		tstats = this_cpu_ptr(dev->tstats);
+		u64_stats_update_begin(&tstats->syncp);
+		if (!d) {
+			u64_stats_add(&tstats->tx_packets, packets);
+			u64_stats_add(&tstats->tx_bytes, bytes);
+		} else {
+			u64_stats_add(&tstats->rx_packets, packets);
+			u64_stats_add(&tstats->rx_bytes, bytes);
+		}
+		u64_stats_update_end(&tstats->syncp);
+		local_bh_enable();
 	}
-
-	return 0;
+unlock:
+	rcu_read_unlock();
 }
+#endif
 
 static void nf_flow_offload_init(struct flow_cls_offload *cls_flow,
 				 __be16 proto, int priority,
@@ -898,140 +943,371 @@ static void nf_flow_offload_init(struct flow_cls_offload *cls_flow,
 	cls_flow->cookie = (unsigned long)tuple;
 }
 
+static bool nf_flow_hw_dir_due(const struct nf_flow_hw_dir *hw)
+{
+	u8 state = READ_ONCE(hw->state);
+
+	return state == NF_FLOW_HW_UNTRIED ||
+	       (state == NF_FLOW_HW_RETRY &&
+		nf_flow_timeout_delta(READ_ONCE(hw->retry_at)) <= 0);
+}
+
+static bool nf_flow_hw_add_needed(struct flow_offload *flow)
+{
+	u8 wanted = test_bit(NF_FLOW_HW_BIDIRECTIONAL, &flow->flags) ? 3 : 1;
+	bool needed;
+
+	if (READ_ONCE(flow->hw_mask) == wanted)
+		return false;
+	/* A lockless queue hint; the serialized worker checks it again. */
+	needed = nf_flow_hw_dir_due(&flow->hw[FLOW_OFFLOAD_DIR_ORIGINAL]);
+	if (test_bit(NF_FLOW_HW_BIDIRECTIONAL, &flow->flags))
+		needed |= nf_flow_hw_dir_due(&flow->hw[FLOW_OFFLOAD_DIR_REPLY]);
+	return needed;
+}
+
+static void nf_flow_hw_record(struct flow_offload *flow, int dir,
+			      const struct nf_flow_hw_result *result,
+			      bool add_attempt)
+{
+	struct nf_flow_hw_dir *hw = &flow->hw[dir];
+	u32 delay;
+
+	spin_lock_bh(&flow->hw_lock);
+	if (add_attempt && hw->attempts != U32_MAX)
+		hw->attempts++;
+	if (add_attempt)
+		hw->stats_error = 0;
+	hw->error = result->error;
+	strscpy(hw->reason, result->reason, sizeof(hw->reason));
+	if (!result->error) {
+		WRITE_ONCE(hw->state, NF_FLOW_HW_INSTALLED);
+		hw->failures = 0;
+		WRITE_ONCE(hw->retry_at, 0);
+		hw->stats_error = 0;
+	} else {
+		hw->failures = min_t(u8, hw->failures + 1, NF_FLOW_HW_RETRY_MAX_SHIFT + 1);
+		if (result->error == -EOPNOTSUPP) {
+			/* Cached only until this flow is destroyed/re-admitted. */
+			WRITE_ONCE(hw->state, NF_FLOW_HW_UNSUPPORTED);
+			WRITE_ONCE(hw->retry_at, 0);
+		} else {
+			WRITE_ONCE(hw->state, NF_FLOW_HW_RETRY);
+			delay = HZ << (hw->failures - 1);
+			WRITE_ONCE(hw->retry_at, nf_flowtable_time_stamp + delay);
+		}
+	}
+	if (hw->state == NF_FLOW_HW_INSTALLED)
+		WRITE_ONCE(flow->hw_mask, flow->hw_mask | BIT(dir));
+	else
+		WRITE_ONCE(flow->hw_mask, flow->hw_mask & ~BIT(dir));
+	spin_unlock_bh(&flow->hw_lock);
+}
+
+/* Called from offload workqueue context, never from the packet datapath. */
+static void nf_flow_hw_sync(struct flow_offload *flow)
+{
+	u8 mask = 0;
+	int dir;
+
+	spin_lock_bh(&flow->hw_lock);
+	for (dir = 0; dir < FLOW_OFFLOAD_DIR_MAX; dir++)
+		if (flow->hw[dir].state == NF_FLOW_HW_INSTALLED)
+			mask |= BIT(dir);
+	WRITE_ONCE(flow->hw_mask, mask);
+	spin_unlock_bh(&flow->hw_lock);
+	/* Preserve the existing ABI: HW_OFFLOAD means at least one direction. */
+	if (mask)
+		set_bit(IPS_HW_OFFLOAD_BIT, &flow->ct->status);
+	else
+		clear_bit(IPS_HW_OFFLOAD_BIT, &flow->ct->status);
+	nf_flow_clients_hw(flow, mask);
+}
+
+static const char *nf_flow_hw_error_message(int error)
+{
+	switch (error) {
+	case -EOPNOTSUPP:
+		return "hardware does not support this rule";
+	case -ENOSPC:
+		return "hardware resources exhausted";
+	case -ENOMEM:
+		return "hardware backend allocation failed";
+	case -EAGAIN:
+		return "hardware dependency not ready";
+	case -EEXIST:
+		return "conflicting hardware rule";
+	case -ENETDOWN:
+		return "hardware datapath not ready";
+	case -ENOENT:
+		return "hardware rule not found";
+	default:
+		return "hardware callback failed";
+	}
+}
+
 static int nf_flow_offload_tuple(struct nf_flowtable *flowtable,
 				 struct flow_offload *flow,
 				 struct nf_flow_rule *flow_rule,
 				 enum flow_offload_tuple_dir dir,
 				 int priority, int cmd,
 				 struct flow_stats *stats,
-				 struct list_head *block_cb_list)
+				 struct list_head *block_cb_list,
+				 struct nf_flow_hw_result *result)
 {
 	struct flow_cls_offload cls_flow = {};
 	struct netlink_ext_ack extack = {};
 	struct flow_block_cb *block_cb;
 	__be16 proto = ETH_P_ALL;
+	struct nf_flow_hw_result failure = {
+		.error = -ENODEV,
+		.reason = "no hardware offload callback",
+	};
+	bool had_error = false;
 	int err, i = 0;
 
 	nf_flow_offload_init(&cls_flow, proto, priority, cmd,
 			     &flow->tuplehash[dir].tuple, &extack);
 	if (cmd == FLOW_CLS_REPLACE)
 		cls_flow.rule = flow_rule->rule;
+#ifdef CONFIG_NF_FLOW_TABLE_CLIENT_STATS
+	/* Endpoint records live until netns teardown; drivers only compare tokens.
+	 * Do not group different flowtables, endpoint directions or PPP devices.
+	 */
+	cls_flow.stats_scope.src = flow->client_ip[!dir] ?: flow->client[!dir];
+	cls_flow.stats_scope.dst = flow->client_ip[dir] ?: flow->client[dir];
+	if (cls_flow.stats_scope.src || cls_flow.stats_scope.dst) {
+		int d;
+
+		cls_flow.stats_scope.owner = nf_flow_clients_scope_owner(read_pnet(&flowtable->net));
+		cls_flow.stats_scope.domain = flowtable;
+		cls_flow.stats_scope.get = nf_flow_stats_scope_get;
+		cls_flow.stats_scope.put = nf_flow_stats_scope_put;
+		cls_flow.stats_scope.account = nf_flow_stats_scope_account;
+		for (d = 0; d < FLOW_OFFLOAD_DIR_MAX; d++) {
+			const struct flow_offload_tuple *t = &flow->tuplehash[d ^ dir].tuple;
+
+			if (t->xmit_type == FLOW_OFFLOAD_XMIT_DIRECT) {
+				cls_flow.stats_scope.path[d * 2] = t->out.ifidx;
+				cls_flow.stats_scope.path[d * 2 + 1] = t->out.encap_ifidx;
+			} else if (t->xmit_type == FLOW_OFFLOAD_XMIT_NEIGH) {
+				cls_flow.stats_scope.path[d * 2] = t->dst_cache->dev->ifindex;
+			}
+		}
+	}
+#endif
 
 	down_read(&flowtable->flow_block_lock);
 	list_for_each_entry(block_cb, block_cb_list, list) {
+		/* Extack belongs to this invocation, not the preceding callback. */
+		memset(&extack, 0, sizeof(extack));
 		err = block_cb->cb(TC_SETUP_CLSFLOWER, &cls_flow,
 				   block_cb->cb_priv);
-		if (err < 0)
+		if (err < 0) {
+			/*
+			 * One transiently unavailable backend must not be hidden
+			 * by another backend's permanent EOPNOTSUPP.
+			 */
+			if (!had_error ||
+			    (failure.error == -EOPNOTSUPP && err != -EOPNOTSUPP)) {
+				failure.error = err;
+				strscpy(failure.reason,
+					extack._msg ?: nf_flow_hw_error_message(err),
+					sizeof(failure.reason));
+			}
+			had_error = true;
 			continue;
+		}
 
 		i++;
 	}
 	up_read(&flowtable->flow_block_lock);
 
-	if (cmd == FLOW_CLS_STATS)
+	if (stats)
 		memcpy(stats, &cls_flow.stats, sizeof(*stats));
 
-	return i;
+	if (result) {
+		if (i)
+			memset(result, 0, sizeof(*result));
+		else
+			*result = failure;
+	}
+	return i ?: failure.error;
 }
 
 static int flow_offload_tuple_add(struct flow_offload_work *offload,
 				  struct nf_flow_rule *flow_rule,
-				  enum flow_offload_tuple_dir dir)
+				  enum flow_offload_tuple_dir dir,
+				  struct nf_flow_hw_result *result,
+				  struct flow_stats *stats)
 {
 	return nf_flow_offload_tuple(offload->flowtable, offload->flow,
 				     flow_rule, dir,
 				     offload->flowtable->priority,
-				     FLOW_CLS_REPLACE, NULL,
-				     &offload->flowtable->flow_block.cb_list);
+				     FLOW_CLS_REPLACE, stats,
+				     &offload->flowtable->flow_block.cb_list, result);
 }
 
-static void flow_offload_tuple_del(struct flow_offload_work *offload,
-				   enum flow_offload_tuple_dir dir)
+static int flow_offload_tuple_del(struct flow_offload_work *offload,
+				  enum flow_offload_tuple_dir dir,
+				  struct flow_stats *stats,
+				  struct nf_flow_hw_result *result)
 {
-	nf_flow_offload_tuple(offload->flowtable, offload->flow, NULL, dir,
+	return nf_flow_offload_tuple(offload->flowtable, offload->flow, NULL, dir,
 			      offload->flowtable->priority,
-			      FLOW_CLS_DESTROY, NULL,
-			      &offload->flowtable->flow_block.cb_list);
+			      FLOW_CLS_DESTROY, stats,
+			      &offload->flowtable->flow_block.cb_list, result);
 }
 
-static int flow_offload_rule_add(struct flow_offload_work *offload,
-				 struct nf_flow_rule *flow_rule[])
+static void flow_offload_stats_account(struct flow_offload_work *offload,
+				       int dir, const struct flow_stats *stats)
 {
-	int ok_count = 0;
-
-	ok_count += flow_offload_tuple_add(offload, flow_rule[0],
-					   FLOW_OFFLOAD_DIR_ORIGINAL);
-	if (test_bit(NF_FLOW_HW_BIDIRECTIONAL, &offload->flow->flags))
-		ok_count += flow_offload_tuple_add(offload, flow_rule[1],
-						   FLOW_OFFLOAD_DIR_REPLY);
-	if (ok_count == 0)
-		return -ENOENT;
-
-	return 0;
+	if (!stats->pkts)
+		return;
+	if (offload->flowtable->flags & NF_FLOWTABLE_COUNTER)
+		nf_ct_acct_add(offload->flow->ct, dir, stats->pkts, stats->bytes);
+	nf_flow_clients_account(offload->flow, dir, stats->bytes, true);
+	nf_flow_encap_tx_acct(offload->flow, dir, stats->pkts, stats->bytes);
+	nf_flow_encap_rx_acct(offload->flow, dir, stats->pkts, stats->bytes);
 }
 
 static void flow_offload_work_add(struct flow_offload_work *offload)
 {
-	struct nf_flow_rule *flow_rule[FLOW_OFFLOAD_DIR_MAX];
-	int err;
+	struct net *net = read_pnet(&offload->flowtable->net);
+	struct flow_offload *flow = offload->flow;
+	struct nf_flow_hw_result result;
+	struct nf_flow_rule *rule;
+	struct flow_stats stats;
+	int dir, ret;
 
-	err = nf_flow_offload_alloc(offload, flow_rule);
-	if (err < 0)
+	if (test_bit(NF_FLOW_TEARDOWN, &flow->flags) ||
+	    test_bit(NF_FLOW_CLOSING, &flow->flags) ||
+	    test_bit(NF_FLOW_HW_DYING, &flow->flags))
 		return;
-
-	err = flow_offload_rule_add(offload, flow_rule);
-	if (err < 0)
-		goto out;
-
-	set_bit(IPS_HW_OFFLOAD_BIT, &offload->flow->ct->status);
-
-out:
-	nf_flow_offload_destroy(flow_rule);
+	/* Existing software flows may retry HW admission; never oversubscribe.
+	 * New over-limit candidates are already dropped synchronously by ADD.
+	 */
+	ret = nf_flow_clients_reserve(flow);
+	if (ret == -ENOENT)
+		return;
+	if (ret) {
+		memset(&result, 0, sizeof(result));
+		result.error = ret;
+		strscpy(result.reason, "client NPU connection limit reached",
+			sizeof(result.reason));
+		for (dir = 0; dir < FLOW_OFFLOAD_DIR_MAX; dir++)
+			if (flow->hw[dir].state != NF_FLOW_HW_INSTALLED)
+				nf_flow_hw_record(flow, dir, &result, true);
+		return;
+	}
+	for (dir = 0; dir < FLOW_OFFLOAD_DIR_MAX; dir++) {
+		if (dir == FLOW_OFFLOAD_DIR_REPLY &&
+		    !test_bit(NF_FLOW_HW_BIDIRECTIONAL, &flow->flags))
+			break;
+		if (!nf_flow_hw_dir_due(&flow->hw[dir]))
+			continue;
+		memset(&result, 0, sizeof(result));
+		rule = nf_flow_offload_rule_alloc(net, offload, dir, &result);
+		if (!IS_ERR(rule)) {
+			memset(&stats, 0, sizeof(stats));
+			flow_offload_tuple_add(offload, rule, dir, &result, &stats);
+			flow_offload_stats_account(offload, dir, &stats);
+			__nf_flow_offload_destroy(rule);
+		}
+		nf_flow_hw_record(flow, dir, &result, true);
+	}
+	nf_flow_hw_sync(flow);
 }
 
-static void flow_offload_work_del(struct flow_offload_work *offload)
-{
-	clear_bit(IPS_HW_OFFLOAD_BIT, &offload->flow->ct->status);
-	flow_offload_tuple_del(offload, FLOW_OFFLOAD_DIR_ORIGINAL);
-	if (test_bit(NF_FLOW_HW_BIDIRECTIONAL, &offload->flow->flags))
-		flow_offload_tuple_del(offload, FLOW_OFFLOAD_DIR_REPLY);
-	set_bit(NF_FLOW_HW_DEAD, &offload->flow->flags);
-}
-
-static void flow_offload_tuple_stats(struct flow_offload_work *offload,
+static int flow_offload_tuple_stats(struct flow_offload_work *offload,
 				     enum flow_offload_tuple_dir dir,
-				     struct flow_stats *stats)
+				     struct flow_stats *stats,
+				     struct nf_flow_hw_result *result)
 {
-	nf_flow_offload_tuple(offload->flowtable, offload->flow, NULL, dir,
-			      offload->flowtable->priority,
-			      FLOW_CLS_STATS, stats,
-			      &offload->flowtable->flow_block.cb_list);
+	return nf_flow_offload_tuple(offload->flowtable, offload->flow, NULL, dir,
+				    offload->flowtable->priority,
+				    FLOW_CLS_STATS, stats,
+				    &offload->flowtable->flow_block.cb_list, result);
 }
 
 static void flow_offload_work_stats(struct flow_offload_work *offload)
 {
 	struct flow_stats stats[FLOW_OFFLOAD_DIR_MAX] = {};
+	struct flow_offload *flow = offload->flow;
+	struct nf_flow_hw_result result;
+	int dir;
+	int ret;
 	u64 lastused;
 
-	flow_offload_tuple_stats(offload, FLOW_OFFLOAD_DIR_ORIGINAL, &stats[0]);
-	if (test_bit(NF_FLOW_HW_BIDIRECTIONAL, &offload->flow->flags))
-		flow_offload_tuple_stats(offload, FLOW_OFFLOAD_DIR_REPLY,
-					 &stats[1]);
+	for (dir = 0; dir < FLOW_OFFLOAD_DIR_MAX; dir++) {
+		/* A software-only direction is not a missing hardware counter. */
+		if (!(READ_ONCE(flow->hw_mask) & BIT(dir)))
+			continue;
+		ret = flow_offload_tuple_stats(offload, dir, &stats[dir], &result);
+		spin_lock_bh(&flow->hw_lock);
+		flow->hw[dir].stats_error = ret < 0 ? ret : 0;
+		if (ret < 0)
+			strscpy(flow->hw[dir].reason, result.reason,
+				sizeof(flow->hw[dir].reason));
+		else
+			flow->hw[dir].reason[0] = '\0';
+		spin_unlock_bh(&flow->hw_lock);
+		if (ret >= 0)
+			continue;
+		/* A disappearing rule is normal; a final valid sample may follow it. */
+		if (ret != -ENOENT || !stats[dir].used_hw_stats_valid)
+			memset(&stats[dir], 0, sizeof(stats[dir]));
+		if (ret != -ENOENT)
+			nf_flow_clients_stats_error(flow);
+		/* ENOENT confirms absence; I/O errors do not prove rule removal. */
+		if (ret == -ENOENT)
+			nf_flow_hw_record(flow, dir, &result, false);
+	}
+	nf_flow_hw_sync(flow);
 
 	lastused = max_t(u64, stats[0].lastused, stats[1].lastused);
 	offload->flow->timeout = max_t(u64, offload->flow->timeout,
 				       lastused + flow_offload_get_timeout(offload->flow));
 
-	if (offload->flowtable->flags & NF_FLOWTABLE_COUNTER) {
-		if (stats[0].pkts)
-			nf_ct_acct_add(offload->flow->ct,
-				       FLOW_OFFLOAD_DIR_ORIGINAL,
-				       stats[0].pkts, stats[0].bytes);
-		if (stats[1].pkts)
-			nf_ct_acct_add(offload->flow->ct,
-				       FLOW_OFFLOAD_DIR_REPLY,
-				       stats[1].pkts, stats[1].bytes);
+	for (dir = 0; dir < FLOW_OFFLOAD_DIR_MAX; dir++)
+		flow_offload_stats_account(offload, dir, &stats[dir]);
+}
+
+static void flow_offload_work_del(struct flow_offload_work *offload)
+{
+	struct flow_offload *flow = offload->flow;
+	struct nf_flow_hw_result result;
+	struct flow_stats stats;
+	int dir, ret;
+
+	/* Ordinary drivers may settle counters only through STATS. */
+	flow_offload_work_stats(offload);
+	for (dir = 0; dir < FLOW_OFFLOAD_DIR_MAX; dir++) {
+		if (dir == FLOW_OFFLOAD_DIR_REPLY &&
+		    !test_bit(NF_FLOW_HW_BIDIRECTIONAL, &flow->flags))
+			break;
+		memset(&stats, 0, sizeof(stats));
+		/* Also discard any backend bookkeeping for refused rules. */
+		ret = flow_offload_tuple_del(offload, dir, &stats, &result);
+		flow_offload_stats_account(offload, dir, &stats);
+		spin_lock_bh(&flow->hw_lock);
+		if (ret < 0 && ret != -ENOENT && ret != -ENODEV) {
+			/* The backend must quarantine its uncertain allocations. */
+			flow->hw[dir].error = ret;
+			strscpy(flow->hw[dir].reason, result.reason,
+				sizeof(flow->hw[dir].reason));
+			WRITE_ONCE(flow->hw[dir].state, NF_FLOW_HW_QUARANTINED);
+		} else {
+			flow->hw[dir].error = 0;
+			flow->hw[dir].reason[0] = '\0';
+			WRITE_ONCE(flow->hw[dir].state, NF_FLOW_HW_REMOVED);
+		}
+		WRITE_ONCE(flow->hw[dir].retry_at, 0);
+		spin_unlock_bh(&flow->hw_lock);
 	}
+	nf_flow_hw_sync(flow);
+	/* Software teardown is complete; quarantined resources belong to driver. */
+	set_bit(NF_FLOW_HW_DEAD, &flow->flags);
 }
 
 static void flow_offload_work_handler(struct work_struct *work)
@@ -1116,6 +1392,14 @@ void nf_flow_offload_refresh(struct nf_flowtable *flowtable,
 {
 	struct flow_offload_work *offload;
 
+	if (test_bit(NF_FLOW_TEARDOWN, &flow->flags) ||
+	    test_bit(NF_FLOW_CLOSING, &flow->flags) ||
+	    test_bit(NF_FLOW_HW_DYING, &flow->flags) ||
+	    test_bit(NF_FLOW_HW_DEAD, &flow->flags) ||
+	    test_bit(NF_FLOW_PENDING, &flow->flags) ||
+	    !nf_flow_hw_add_needed(flow))
+		return;
+
 	offload = nf_flow_offload_work_alloc(flowtable, flow, FLOW_CLS_REPLACE);
 	if (!offload)
 		return;
@@ -1150,18 +1434,91 @@ void nf_flow_offload_stats(struct nf_flowtable *flowtable,
 			   struct flow_offload *flow)
 {
 	struct flow_offload_work *offload;
+#ifdef CONFIG_NF_FLOW_TABLE_CLIENT_STATS
+	u64 now = get_jiffies_64(), interval = 0;
+#endif
 	__s32 delta;
 
-	delta = nf_flow_timeout_delta(flow->timeout);
-	if ((delta >= (9 * flow_offload_get_timeout(flow)) / 10))
+	if (!nf_flow_offload_has_hw(flow))
 		return;
+
+#ifdef CONFIG_NF_FLOW_TABLE_CLIENT_STATS
+	if (flowtable->clients_aggregate_stats) {
+		u64 next = READ_ONCE(flow->hw_stats_next);
+		unsigned long timeout = flow_offload_get_timeout(flow);
+
+		/* A busy software fallback refreshes flow->timeout too. Basing
+		 * this check on that timeout hides an invalidated HW rule forever.
+		 */
+		interval = max_t(u64, 1, timeout >= 10 * HZ ?
+				 timeout / 2 : timeout / 10);
+		if (!next) {
+			/* Fresh rules already have an installation timestamp. Avoid
+			 * an immediate age transaction for every short-lived BT flow.
+			 */
+			WRITE_ONCE(flow->hw_stats_next, now + interval);
+			return;
+		}
+		if (time_before64(now, next))
+			return;
+	} else
+#endif
+	{
+		delta = nf_flow_timeout_delta(flow->timeout);
+		if (delta >= (9 * flow_offload_get_timeout(flow)) / 10)
+			return;
+	}
 
 	offload = nf_flow_offload_work_alloc(flowtable, flow, FLOW_CLS_STATS);
 	if (!offload)
 		return;
-
+#ifdef CONFIG_NF_FLOW_TABLE_CLIENT_STATS
+	if (interval)
+		WRITE_ONCE(flow->hw_stats_next, now + interval);
+#endif
 	flow_offload_queue_work(offload);
 }
+
+#ifdef CONFIG_NF_FLOW_TABLE_CLIENT_STATS
+bool nf_flow_offload_stats_aggregate(struct nf_flowtable *table)
+{
+	struct flow_cls_offload cls = { .command = FLOW_CLS_STATS_AGGREGATE };
+	struct flow_block_cb *cb;
+	bool supported = true, found = false;
+
+	cls.stats_scope.domain = table;
+	down_read(&table->flow_block_lock);
+	list_for_each_entry(cb, &table->flow_block.cb_list, list) {
+		int ret;
+
+		cls.aggregate_stats_supported = false;
+		ret = cb->cb(TC_SETUP_CLSFLOWER, &cls, cb->cb_priv);
+		found = true;
+		supported &= cls.aggregate_stats_supported;
+		/* A failed supported batch must not create a per-rule read storm. */
+		if (ret < 0 && cls.aggregate_stats_supported)
+			nf_flow_clients_batch_error(read_pnet(&table->net));
+	}
+	up_read(&table->flow_block_lock);
+	return found && supported;
+}
+
+void nf_flow_offload_stats_force(struct nf_flowtable *table, struct flow_offload *flow)
+{
+	struct flow_offload_work *offload;
+
+	if (!nf_flow_offload_has_hw(flow))
+		return;
+	offload = nf_flow_offload_work_alloc(table, flow, FLOW_CLS_STATS);
+	if (offload)
+		flow_offload_queue_work(offload);
+}
+
+void nf_flow_offload_stats_flush(void)
+{
+	flush_workqueue(nf_flow_offload_stats_wq);
+}
+#endif
 
 void nf_flow_table_offload_flush_cleanup(struct nf_flowtable *flowtable)
 {
@@ -1170,6 +1527,70 @@ void nf_flow_table_offload_flush_cleanup(struct nf_flowtable *flowtable)
 		nf_flow_table_gc_run(flowtable);
 	}
 }
+
+#ifdef CONFIG_NF_FLOW_TABLE_PROCFS
+static const char *nf_flow_hw_state_name(u8 state)
+{
+	switch (state) {
+	case NF_FLOW_HW_INSTALLED:
+		return "installed";
+	case NF_FLOW_HW_RETRY:
+		return "retry";
+	case NF_FLOW_HW_UNSUPPORTED:
+		return "unsupported";
+	case NF_FLOW_HW_REMOVED:
+		return "removed";
+	case NF_FLOW_HW_QUARANTINED:
+		return "quarantined";
+	default:
+		return "untried";
+	}
+}
+
+void nf_flow_offload_hw_show(struct seq_file *seq, struct nf_flowtable *table,
+			     struct flow_offload *flow)
+{
+	struct nf_flow_hw_dir hw[FLOW_OFFLOAD_DIR_MAX];
+	const struct flow_offload_tuple *tuple;
+	bool requested = test_bit(NF_FLOW_HW, &flow->flags);
+	u8 mask;
+	int dir;
+
+	spin_lock_bh(&flow->hw_lock);
+	memcpy(hw, flow->hw, sizeof(hw));
+	mask = flow->hw_mask;
+	spin_unlock_bh(&flow->hw_lock);
+	for (dir = 0; dir < FLOW_OFFLOAD_DIR_MAX; dir++) {
+		bool eligible = requested && (!dir ||
+			test_bit(NF_FLOW_HW_BIDIRECTIONAL, &flow->flags));
+		s32 delta = nf_flow_timeout_delta(hw[dir].retry_at);
+		u32 retry_ms = hw[dir].state == NF_FLOW_HW_RETRY && delta > 0 ?
+				jiffies_to_msecs(delta) : 0;
+
+		tuple = &flow->tuplehash[dir].tuple;
+		seq_printf(seq, "priority=%d dir=%s iif=%d family=%u proto=%u ",
+			   table->priority, dir ? "reply" : "original",
+			   tuple->iifidx, tuple->l3proto, tuple->l4proto);
+		if (tuple->l3proto == NFPROTO_IPV4)
+			seq_printf(seq, "src=%pI4 dst=%pI4 ",
+				   &tuple->src_v4, &tuple->dst_v4);
+		else if (tuple->l3proto == NFPROTO_IPV6)
+			seq_printf(seq, "src=%pI6c dst=%pI6c ",
+				   &tuple->src_v6, &tuple->dst_v6);
+		seq_printf(seq, "sport=%u dport=%u hw_mask=%u state=%s errno=%d stats_errno=%d attempts=%u failures=%u retry_ms=%u pending=%d dying=%d closing=%d teardown=%d reason=\"",
+			   ntohs(tuple->src_port), ntohs(tuple->dst_port), mask,
+			   eligible ? nf_flow_hw_state_name(hw[dir].state) : "disabled",
+			   hw[dir].error, hw[dir].stats_error, hw[dir].attempts,
+			   hw[dir].failures, retry_ms,
+			   test_bit(NF_FLOW_PENDING, &flow->flags),
+			   test_bit(NF_FLOW_HW_DYING, &flow->flags),
+			   test_bit(NF_FLOW_CLOSING, &flow->flags),
+			   test_bit(NF_FLOW_TEARDOWN, &flow->flags));
+		seq_escape(seq, hw[dir].reason, "\\\"\n\r\t");
+		seq_puts(seq, "\"\n");
+	}
+}
+#endif
 
 void nf_flow_table_offload_flush(struct nf_flowtable *flowtable)
 {
@@ -1279,6 +1700,16 @@ int nf_flow_table_offload_setup(struct nf_flowtable *flowtable,
 	if (!nf_flowtable_hw_offload(flowtable))
 		return nf_flow_offload_xdp_setup(flowtable, dev, cmd);
 
+	/*
+	 * Drain while callbacks still exist: the last UNBIND otherwise makes
+	 * final DESTROY/STATS unreachable. Invalidate the table conservatively;
+	 * other surviving devices can admit new flows normally.
+	 */
+	if (cmd == FLOW_BLOCK_UNBIND) {
+		nf_flow_table_gc_cleanup(flowtable, NULL);
+		nf_flow_table_gc_run(flowtable);
+		nf_flow_table_offload_flush(flowtable);
+	}
 	if (dev->netdev_ops->ndo_setup_tc)
 		err = nf_flow_table_offload_cmd(&bo, flowtable, dev, cmd,
 						&extack);
@@ -1305,7 +1736,7 @@ int nf_flow_table_offload_init(void)
 		goto err_del_wq;
 
 	nf_flow_offload_stats_wq  = alloc_workqueue("nf_ft_offload_stats",
-						    WQ_UNBOUND | WQ_SYSFS, 0);
+						    WQ_UNBOUND | WQ_SYSFS, 1);
 	if (!nf_flow_offload_stats_wq)
 		goto err_stats_wq;
 

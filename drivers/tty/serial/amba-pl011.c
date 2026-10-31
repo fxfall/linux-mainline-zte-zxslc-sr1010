@@ -38,6 +38,7 @@
 #include <linux/types.h>
 #include <linux/of.h>
 #include <linux/pinctrl/consumer.h>
+#include <linux/reset.h>
 #include <linux/sizes.h>
 #include <linux/io.h>
 #include <linux/acpi.h>
@@ -2774,6 +2775,21 @@ static void pl011_early_write(struct console *con, const char *s, unsigned int n
 	uart_console_write(&dev->port, s, n, pl011_putc);
 }
 
+static void zte_pl011_early_putc(struct uart_port *port, unsigned char c)
+{
+	/* The vendor early output path only waits for transmit FIFO space. */
+	while (readl(port->membase + ZX_UART011_FR) & UART01x_FR_TXFF)
+		cpu_relax();
+	writel(c, port->membase + ZX_UART011_DR);
+}
+
+static void zte_pl011_early_write(struct console *con, const char *s, unsigned int n)
+{
+	struct earlycon_device *dev = con->data;
+
+	uart_console_write(&dev->port, s, n, zte_pl011_early_putc);
+}
+
 #ifdef CONFIG_CONSOLE_POLL
 static int pl011_getc(struct uart_port *port)
 {
@@ -2861,6 +2877,27 @@ static int __init sbsa_uart_early_console_setup(struct earlycon_device *device,
 }
 
 OF_EARLYCON_DECLARE(pl011, "arm,sbsa-uart", sbsa_uart_early_console_setup);
+
+static int __init zte_pl011_early_console_setup(struct earlycon_device *device,
+						const char *opt)
+{
+	if (!device->port.membase)
+		return -ENODEV;
+
+	device->con->write = zte_pl011_early_write;
+	return 0;
+}
+
+/* Keep this after the fallbacks: this object emits the table in reverse order. */
+OF_EARLYCON_DECLARE(zteuart, "zte,zx279133-uart", zte_pl011_early_console_setup);
+
+/*
+ * Name without a trailing digit: earlycon derives the console index from
+ * trailing numerals, so "ztepl011" would print as "ztepl11" (index 11).
+ */
+EARLYCON_DECLARE(zteuart, zte_pl011_early_console_setup);
+
+
 
 /*
  * On Qualcomm Datacenter Technologies QDF2400 SOCs affected by
@@ -3026,6 +3063,7 @@ static int pl011_probe(struct amba_device *dev, const struct amba_id *id)
 {
 	struct uart_amba_port *uap;
 	struct vendor_data *vendor = id->data;
+	struct reset_control *rst;
 	int portnr, ret;
 	u32 val;
 
@@ -3037,6 +3075,17 @@ static int pl011_probe(struct amba_device *dev, const struct amba_id *id)
 			   GFP_KERNEL);
 	if (!uap)
 		return -ENOMEM;
+
+	/*
+	 * ZX279133 supplies arm,primecell-periphid, bypassing
+	 * amba_read_periphid() and its shared-reset deassertion.
+	 */
+	if (vendor == &vendor_zte) {
+		rst = devm_reset_control_get_shared_deasserted(&dev->dev, NULL);
+		if (IS_ERR(rst))
+			return dev_err_probe(&dev->dev, PTR_ERR(rst),
+					     "failed to deassert reset\n");
+	}
 
 	uap->clk = devm_clk_get(&dev->dev, NULL);
 	if (IS_ERR(uap->clk))
@@ -3245,6 +3294,7 @@ static struct platform_driver arm_sbsa_uart_platform_driver = {
 };
 
 static const struct amba_id pl011_ids[] = {
+	{ .id = 0x001feffe, .mask = 0x00ffffff, .data = &vendor_zte },
 	{
 		.id	= 0x00041011,
 		.mask	= 0x000fffff,

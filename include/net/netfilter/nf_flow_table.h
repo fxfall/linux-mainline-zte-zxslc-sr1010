@@ -6,6 +6,7 @@
 #include <linux/netdevice.h>
 #include <linux/rhashtable-types.h>
 #include <linux/rcupdate.h>
+#include <linux/spinlock.h>
 #include <linux/netfilter.h>
 #include <linux/netfilter/nf_conntrack_tuple_common.h>
 #include <net/flow_offload.h>
@@ -13,6 +14,9 @@
 #include <linux/if_pppox.h>
 #include <linux/ppp_defs.h>
 
+struct nf_flow_client;
+struct file;
+struct seq_file;
 struct nf_flowtable;
 struct nf_flow_rule;
 struct flow_offload;
@@ -81,6 +85,10 @@ struct nf_flowtable {
 	struct list_head		list;		/* slowpath parts */
 	const struct nf_flowtable_type	*type;
 	struct delayed_work		gc_work;
+#ifdef CONFIG_NF_FLOW_TABLE_CLIENT_STATS
+	u64 clients_polled_ms;
+	bool clients_aggregate_stats;
+#endif
 	struct flow_block		flow_block;
 	struct rw_semaphore		flow_block_lock; /* Guards flow_block */
 	possible_net_t			net;
@@ -164,6 +172,7 @@ struct flow_offload_tuple {
 		};
 		struct {
 			u32		ifidx;
+			u32		encap_ifidx; /* upper device bypassed by DIRECT TX */
 			u8		h_source[ETH_ALEN];
 			u8		h_dest[ETH_ALEN];
 		} out;
@@ -196,6 +205,28 @@ enum flow_offload_type {
 	NF_FLOW_OFFLOAD_ROUTE,
 };
 
+#define NF_FLOW_HW_REASON_LEN 64
+
+enum nf_flow_hw_state {
+	NF_FLOW_HW_UNTRIED,
+	NF_FLOW_HW_INSTALLED,
+	NF_FLOW_HW_RETRY,
+	NF_FLOW_HW_UNSUPPORTED,
+	NF_FLOW_HW_REMOVED,
+	NF_FLOW_HW_QUARANTINED,
+};
+
+/* Control-plane state only; the packet path never takes hw_lock. */
+struct nf_flow_hw_dir {
+	u32 retry_at;
+	u32 attempts;
+	int error;
+	int stats_error;
+	u8 state;
+	u8 failures;
+	char reason[NF_FLOW_HW_REASON_LEN];
+};
+
 struct flow_offload {
 	struct flow_offload_tuple_rhash		tuplehash[FLOW_OFFLOAD_DIR_MAX];
 	struct nf_conn				*ct;
@@ -203,7 +234,25 @@ struct flow_offload {
 	u16					type;
 	u32					timeout;
 	struct rcu_head				rcu_head;
+	/* Protects worker updates and diagnostic snapshots, not packet hints. */
+	spinlock_t				hw_lock;
+	struct nf_flow_hw_dir			hw[FLOW_OFFLOAD_DIR_MAX];
+	u8					hw_mask;
+#ifdef CONFIG_NF_FLOW_TABLE_CLIENT_STATS
+	/* Independent of timeout: software forwarding must not defer HW repair. */
+	u64 hw_stats_next;
+	struct nf_flow_client *client[FLOW_OFFLOAD_DIR_MAX];
+	struct nf_flow_client *client_ip[FLOW_OFFLOAD_DIR_MAX];
+	u8 client_hw_mask;
+	bool client_active;
+	bool client_hw_slot;
+#endif
 };
+
+static inline bool nf_flow_offload_has_hw(const struct flow_offload *flow)
+{
+	return READ_ONCE(flow->hw_mask) != 0;
+}
 
 #define NF_FLOW_TIMEOUT (30 * HZ)
 #define nf_flowtable_time_stamp	(u32)jiffies
@@ -318,6 +367,13 @@ static inline bool nf_flow_dst_check(struct flow_offload_tuple *tuple)
 	return dst_check(tuple->dst_cache, tuple->dst_cookie);
 }
 
+void nf_flow_encap_tx_acct(const struct flow_offload *flow,
+			   enum flow_offload_tuple_dir dir,
+			   u64 packets, u64 bytes);
+void nf_flow_encap_rx_acct(const struct flow_offload *flow,
+			   enum flow_offload_tuple_dir dir,
+			   u64 packets, u64 bytes);
+
 struct flow_offload_tuple_rhash *flow_offload_lookup(struct nf_flowtable *flow_table,
 						     struct flow_offload_tuple *tuple);
 void nf_flow_table_gc_run(struct nf_flowtable *flow_table);
@@ -422,7 +478,47 @@ static inline bool nf_flow_pppoe_proto(struct sk_buff *skb, __be16 *inner_proto)
 #define NF_FLOW_TABLE_STAT_DEC_ATOMIC(net, count)	\
 	this_cpu_dec((net)->ft.stat->count)
 
+#ifdef CONFIG_NF_FLOW_TABLE_CLIENT_STATS
+int nf_flow_clients_bind(struct nf_flowtable *table, struct flow_offload *flow);
+int nf_flow_clients_reserve(struct flow_offload *flow);
+int nf_flow_clients_limits_show(struct seq_file *seq, void *v);
+int nf_flow_clients_limits_write(struct file *file, char *buf, size_t count);
+void nf_flow_clients_hw(struct flow_offload *flow, u8 hw_mask);
+void nf_flow_clients_deactivate(struct flow_offload *flow);
+void nf_flow_clients_release(struct flow_offload *flow);
+void *nf_flow_clients_scope_owner(struct net *net);
+void nf_flow_clients_scope_get(const void *owner);
+void nf_flow_clients_scope_put(const void *owner);
+struct net *nf_flow_clients_scope_net(const void *owner);
+void nf_flow_clients_account_scope(const void *source, const void *dest, u64 bytes);
+void nf_flow_clients_account(struct flow_offload *flow, int dir, u64 bytes, bool hw);
+int nf_flow_clients_init_net(struct net *net);
+void nf_flow_clients_free_net(struct net *net);
+void nf_flow_clients_sample(struct net *net, u64 elapsed_ms);
+void nf_flow_clients_show(struct seq_file *seq, struct net *net);
+u32 nf_flow_clients_errors(struct net *net);
+void nf_flow_clients_stats_error(struct flow_offload *flow);
+void nf_flow_clients_batch_error(struct net *net);
+int nf_flow_clients_seq_show(struct seq_file *seq, void *v);
+bool nf_flow_offload_stats_aggregate(struct nf_flowtable *table);
+void nf_flow_offload_stats_force(struct nf_flowtable *table, struct flow_offload *flow);
+void nf_flow_offload_stats_flush(void);
+#else
+static inline int nf_flow_clients_bind(struct nf_flowtable *t, struct flow_offload *f) { return 0; }
+static inline int nf_flow_clients_reserve(struct flow_offload *f) { return 0; }
+static inline void nf_flow_clients_hw(struct flow_offload *f, u8 hw_mask) {}
+static inline void nf_flow_clients_deactivate(struct flow_offload *f) {}
+static inline void nf_flow_clients_stats_error(struct flow_offload *f) {}
+static inline void nf_flow_clients_release(struct flow_offload *f) {}
+static inline void nf_flow_clients_account(struct flow_offload *f, int d, u64 b, bool h) {}
+static inline int nf_flow_clients_init_net(struct net *n) { return 0; }
+static inline void nf_flow_clients_free_net(struct net *n) {}
+#endif
+
 #ifdef CONFIG_NF_FLOW_TABLE_PROCFS
+int nf_flow_hw_seq_show(struct seq_file *seq, void *v);
+void nf_flow_offload_hw_show(struct seq_file *seq, struct nf_flowtable *table,
+			     struct flow_offload *flow);
 int nf_flow_table_init_proc(struct net *net);
 void nf_flow_table_fini_proc(struct net *net);
 #else

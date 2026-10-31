@@ -75,6 +75,7 @@ static struct mtd_info *allocate_partition(struct mtd_info *parent,
 	child->oobsize = parent->oobsize;
 	child->oobavail = parent->oobavail;
 	child->subpage_sft = parent->subpage_sft;
+	child->program_once = parent->program_once;
 
 	child->name = name;
 	child->owner = parent->owner;

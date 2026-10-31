@@ -17,4 +17,63 @@ if NET_VENDOR_ZTE
 
 source "drivers/net/ethernet/zte/dinghai/Kconfig"
 
+config ZTE_ZX279133_ETH
+	tristate "ZTE ZX279133 NPPT Ethernet support"
+	depends on OF && HAS_IOMEM && HAS_DMA
+	depends on COMMON_CLK_ZX279133
+	depends on PHY_ZX279133_PON_SERDES
+	depends on PCS_XPCS
+	select PAGE_POOL
+	select CRC32
+	help
+	  Enable support for the NPPT Ethernet controller and IDM packet DMA
+	  engine in the ZTE ZX279133 SoC. The driver provides phylink MAC/PCS
+	  integration, TX completion, page-pool RX, and the SR1010 WAN path.
+	  It also owns the shared packet-processing resources used by LAN.
+
+config ZTE_ZX279133_NATIVE_DEBUG
+	bool "ZTE ZX279133 native NP hardware debug endpoint"
+	depends on ZTE_ZX279133_ETH && DEBUG_FS
+	help
+	  Provide an on-demand root-only debugfs command endpoint for native
+	  PLCR, SSCH and VLAN experiments. No automatic hardware changes or
+	  polling are performed. Writes require CAP_SYS_RAWIO and can affect
+	  live forwarding. The npu-debug command supplies the user interface.
+
+config ZTE_ZX279133_FNOFFLOAD
+	tristate "ZTE ZX279133 flowtable hardware offload"
+	depends on ZTE_ZX279133_ETH
+	depends on NF_FLOW_TABLE
+	default ZTE_ZX279133_ETH
+	help
+	  Optional rule translator for the NPPT npu driver. Without it the
+	  Ethernet driver continues to provide normal software networking.
+	  Reload nftables hardware flowtables after loading this module late.
+	  Software flowtables can operate independently of this module.
+
+config ZTE_ZX279133_LAN_CONDUIT
+	tristate "ZTE ZX279133 XMAC0 LAN conduit"
+	depends on ZTE_ZX279133_ETH
+	default y
+	help
+	  Build the XMAC0 LAN conduit netdev as a child of the ZX279133
+	  NPPT controller. The conduit is used as a DSA CPU-facing netdev.
+	  Shared DMA and datapath ownership remains in the parent driver,
+	  which coordinates WAN and LAN lifecycle and queue accounting.
+
+config ZTE_ZX279133_RTL8372N
+	tristate "ZTE ZX279133 RTL8372N DSA switch driver"
+	depends on ZTE_ZX279133_ETH
+	select ZTE_ZX279133_LAN_CONDUIT
+	depends on PHY_ZX279133_UNI_SERDES
+	depends on PCS_XPCS
+	depends on NET_DSA
+	select NET_DSA_TAG_ZX279133_RTL8372N
+	help
+	  Build the RTL8372N DSA switch driver for the SR1010 LAN path. The
+	  driver owns the external switch reset, XMAC0/XPCS0/Uni-SerDes link,
+	  physical ports 4 through 7, and CPU port 8. It registers four DSA
+	  user ports through the dedicated ZX279133 LAN conduit.
+
+
 endif # NET_VENDOR_ZTE

@@ -718,6 +718,16 @@ config NF_FLOW_TABLE
 
 	  To compile it as a module, choose M here.
 
+config NF_FLOW_TABLE_CLIENT_STATS
+	bool "Per-client software and hardware flow offload statistics"
+	depends on NF_FLOW_TABLE && PROC_FS
+	select NF_FLOW_TABLE_PROCFS
+	help
+	  Export one per-MAC statistics snapshot at /proc/net/nf_flowtable_clients.
+	  Software fast-path IP bytes and hardware driver statistics are merged
+	  in the kernel. Sampling is on demand, at most once every three seconds.
+	  No user-space sampler or per-packet MAC lookup is required.
+
 config NF_FLOW_TABLE_PROCFS
 	bool "Supply flow table statistics in procfs"
 	depends on NF_FLOW_TABLE

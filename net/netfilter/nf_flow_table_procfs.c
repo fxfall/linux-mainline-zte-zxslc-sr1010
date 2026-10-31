@@ -71,10 +71,41 @@ int nf_flow_table_init_proc(struct net *net)
 	pde = proc_create_net("nf_flowtable", 0444, net->proc_net_stat,
 			      &nf_flow_table_cpu_seq_ops,
 			      sizeof(struct seq_net_private));
-	return pde ? 0 : -ENOMEM;
+	if (!pde)
+		return -ENOMEM;
+	pde = proc_create_net_single("nf_flowtable_hw", 0400, net->proc_net,
+				     nf_flow_hw_seq_show, NULL);
+	if (!pde) {
+		remove_proc_entry("nf_flowtable", net->proc_net_stat);
+		return -ENOMEM;
+	}
+#ifdef CONFIG_NF_FLOW_TABLE_CLIENT_STATS
+	pde = proc_create_net_single("nf_flowtable_clients", 0400, net->proc_net,
+				     nf_flow_clients_seq_show, NULL);
+	if (!pde) {
+		remove_proc_entry("nf_flowtable_hw", net->proc_net);
+		remove_proc_entry("nf_flowtable", net->proc_net_stat);
+		return -ENOMEM;
+	}
+	pde = proc_create_net_single_write("nf_flowtable_client_limits", 0600,
+					 net->proc_net, nf_flow_clients_limits_show,
+					 nf_flow_clients_limits_write, NULL);
+	if (!pde) {
+		remove_proc_entry("nf_flowtable_clients", net->proc_net);
+		remove_proc_entry("nf_flowtable_hw", net->proc_net);
+		remove_proc_entry("nf_flowtable", net->proc_net_stat);
+		return -ENOMEM;
+	}
+#endif
+	return 0;
 }
 
 void nf_flow_table_fini_proc(struct net *net)
 {
+	remove_proc_entry("nf_flowtable_hw", net->proc_net);
 	remove_proc_entry("nf_flowtable", net->proc_net_stat);
+#ifdef CONFIG_NF_FLOW_TABLE_CLIENT_STATS
+	remove_proc_entry("nf_flowtable_clients", net->proc_net);
+	remove_proc_entry("nf_flowtable_client_limits", net->proc_net);
+#endif
 }

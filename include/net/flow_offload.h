@@ -541,6 +541,20 @@ static inline bool flow_rule_match_has_control_flags(const struct flow_rule *rul
 	return flow_rule_has_control_flags(match.mask->flags, extack);
 }
 
+/* An opaque accounting domain supplied by a flowtable, never a flow identity.
+ * Ordered endpoints and encapsulation devices keep group attribution exact.
+ */
+struct flow_stats_scope {
+	const void *owner;
+	const void *domain;
+	const void *src;
+	const void *dst;
+	u32 path[4];
+	void (*get)(const struct flow_stats_scope *scope);
+	void (*put)(const struct flow_stats_scope *scope);
+	void (*account)(const struct flow_stats_scope *scope, u64 pkts, u64 bytes);
+};
+
 struct flow_stats {
 	u64	pkts;
 	u64	bytes;
@@ -681,6 +695,8 @@ enum flow_cls_command {
 	FLOW_CLS_STATS,
 	FLOW_CLS_TMPLT_CREATE,
 	FLOW_CLS_TMPLT_DESTROY,
+	/* Optional flowtable endpoint counters; no per-rule cookie. */
+	FLOW_CLS_STATS_AGGREGATE,
 };
 
 struct flow_cls_common_offload {
@@ -692,9 +708,11 @@ struct flow_cls_common_offload {
 };
 
 struct flow_cls_offload {
+	struct flow_stats_scope stats_scope;
 	struct flow_cls_common_offload common;
 	enum flow_cls_command command;
 	bool use_act_stats;
+	bool aggregate_stats_supported;
 	unsigned long cookie;
 	struct flow_rule *rule;
 	struct flow_stats stats;

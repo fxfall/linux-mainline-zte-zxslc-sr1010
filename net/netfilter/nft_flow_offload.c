@@ -51,6 +51,7 @@ static void nft_flow_offload_eval(const struct nft_expr *expr,
 				  struct nft_regs *regs,
 				  const struct nft_pktinfo *pkt)
 {
+	bool quota_drop = false;
 	struct nft_flow_offload *priv = nft_expr_priv(expr);
 	struct nf_flowtable *flowtable = &priv->flowtable->data;
 	struct tcphdr _tcph, *tcph = NULL;
@@ -119,8 +120,10 @@ static void nft_flow_offload_eval(const struct nft_expr *expr,
 
 	__set_bit(NF_FLOW_HW_BIDIRECTIONAL, &flow->flags);
 	ret = flow_offload_add(flowtable, flow);
-	if (ret < 0)
+	if (ret < 0) {
+		quota_drop = ret == -EDQUOT;
 		goto err_flow_add;
+	}
 
 	return;
 
@@ -132,7 +135,7 @@ err_flow_alloc:
 err_flow_route:
 	clear_bit(IPS_OFFLOAD_BIT, &ct->status);
 out:
-	regs->verdict.code = NFT_BREAK;
+	regs->verdict.code = quota_drop ? NF_DROP : NFT_BREAK;
 }
 
 static int nft_flow_offload_validate(const struct nft_ctx *ctx,

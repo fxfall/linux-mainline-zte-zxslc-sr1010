@@ -1186,8 +1186,20 @@ int jffs2_nand_flash_setup(struct jffs2_sb_info *c)
 	if (!c->mtd->oobsize)
 		return 0;
 
-	/* Cleanmarker is out-of-band, so inline size zero */
-	c->cleanmarker_size = 0;
+	if (c->mtd->program_once) {
+		/*
+		 * The OOB cannot be programmed apart from the data, so the clean
+		 * marker is a node in the data area. It takes the whole first
+		 * page: the first node of the block then starts on the next
+		 * page, and no page is programmed twice.
+		 */
+		c->cleanmarker_size = c->mtd->writesize;
+		pr_info("NAND pages can be programmed once: clean markers are in the data, %u bytes\n",
+			c->cleanmarker_size);
+	} else {
+		/* Cleanmarker is out-of-band, so inline size zero */
+		c->cleanmarker_size = 0;
+	}
 
 	if (c->mtd->oobavail == 0) {
 		pr_err("inconsistent device description\n");

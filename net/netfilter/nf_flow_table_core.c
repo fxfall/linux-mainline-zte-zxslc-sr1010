@@ -5,6 +5,9 @@
 #include <linux/netfilter.h>
 #include <linux/rhashtable.h>
 #include <linux/netdevice.h>
+#include <linux/seq_file.h>
+#include <linux/seq_file_net.h>
+#include <linux/timekeeping.h>
 #include <net/ip.h>
 #include <net/ip6_route.h>
 #include <net/netfilter/nf_tables.h>
@@ -63,6 +66,7 @@ struct flow_offload *flow_offload_alloc(struct nf_conn *ct)
 
 	refcount_inc(&ct->ct_general.use);
 	flow->ct = ct;
+	spin_lock_init(&flow->hw_lock);
 
 	flow_offload_fill_dir(flow, FLOW_OFFLOAD_DIR_ORIGINAL);
 	flow_offload_fill_dir(flow, FLOW_OFFLOAD_DIR_REPLY);
@@ -127,6 +131,7 @@ static int flow_offload_fill_route(struct flow_offload *flow,
 
 	switch (route->tuple[dir].xmit_type) {
 	case FLOW_OFFLOAD_XMIT_DIRECT:
+		flow_tuple->out.encap_ifidx = dst->dev->ifindex;
 		if (route->tuple[!dir].in.num_tuns) {
 			flow_tuple->dst_cache = dst;
 			flow_tuple->dst_cookie =
@@ -268,6 +273,7 @@ static void flow_offload_free_rcu(struct rcu_head *rcu_head)
 
 void flow_offload_free(struct flow_offload *flow)
 {
+	nf_flow_clients_release(flow);
 	switch (flow->type) {
 	case NF_FLOW_OFFLOAD_ROUTE:
 		flow_offload_route_release(flow);
@@ -336,6 +342,9 @@ int flow_offload_add(struct nf_flowtable *flow_table, struct flow_offload *flow)
 {
 	int err;
 
+	err = nf_flow_clients_bind(flow_table, flow);
+	if (err)
+		return err;
 	flow->timeout = nf_flowtable_time_stamp + flow_offload_get_timeout(flow);
 
 	err = rhashtable_insert_fast(&flow_table->rhashtable,
@@ -384,6 +393,75 @@ void flow_offload_refresh(struct nf_flowtable *flow_table,
 }
 EXPORT_SYMBOL_GPL(flow_offload_refresh);
 
+/*
+ * A flow that leaves through an encapsulating device such as pppoe-wan is
+ * sent on the lower device directly (xmit_type DIRECT, out.encap_ifidx is the upper
+ * device, out.ifidx the lower one), so in hardware, and on the way in also
+ * in software, the upper device never sees its packets. Count them there when
+ * the device keeps the generic per-cpu software counters, as ppp does.
+ */
+static struct net_device *
+nf_flow_encap_dev(const struct flow_offload *flow,
+		  enum flow_offload_tuple_dir dir)
+{
+	const struct flow_offload_tuple *tuple = &flow->tuplehash[dir].tuple;
+	struct net_device *dev;
+
+	if (tuple->xmit_type != FLOW_OFFLOAD_XMIT_DIRECT ||
+	    tuple->out.encap_ifidx == tuple->out.ifidx)
+		return NULL;
+
+	dev = dev_get_by_index_rcu(nf_ct_net(flow->ct), tuple->out.encap_ifidx);
+	if (!dev || dev->pcpu_stat_type != NETDEV_PCPU_STAT_TSTATS)
+		return NULL;
+
+	return dev;
+}
+
+/* Packets of @dir went out through the upper device of their own tuple. */
+void nf_flow_encap_tx_acct(const struct flow_offload *flow,
+			   enum flow_offload_tuple_dir dir,
+			   u64 packets, u64 bytes)
+{
+	struct pcpu_sw_netstats *tstats;
+	struct net_device *dev;
+
+	rcu_read_lock();
+	dev = nf_flow_encap_dev(flow, dir);
+	if (dev) {
+		local_bh_disable();
+		tstats = this_cpu_ptr(dev->tstats);
+		u64_stats_update_begin(&tstats->syncp);
+		u64_stats_add(&tstats->tx_packets, packets);
+		u64_stats_add(&tstats->tx_bytes, bytes);
+		u64_stats_update_end(&tstats->syncp);
+		local_bh_enable();
+	}
+	rcu_read_unlock();
+}
+
+/* Packets of @dir came in through the device the other direction leaves by. */
+void nf_flow_encap_rx_acct(const struct flow_offload *flow,
+			   enum flow_offload_tuple_dir dir,
+			   u64 packets, u64 bytes)
+{
+	struct pcpu_sw_netstats *tstats;
+	struct net_device *dev;
+
+	rcu_read_lock();
+	dev = nf_flow_encap_dev(flow, !dir);
+	if (dev) {
+		local_bh_disable();
+		tstats = this_cpu_ptr(dev->tstats);
+		u64_stats_update_begin(&tstats->syncp);
+		u64_stats_add(&tstats->rx_packets, packets);
+		u64_stats_add(&tstats->rx_bytes, bytes);
+		u64_stats_update_end(&tstats->syncp);
+		local_bh_enable();
+	}
+	rcu_read_unlock();
+}
+
 static void flow_offload_del(struct nf_flowtable *flow_table,
 			     struct flow_offload *flow)
 {
@@ -401,6 +479,7 @@ void flow_offload_teardown(struct flow_offload *flow)
 	clear_bit(IPS_OFFLOAD_BIT, &flow->ct->status);
 	if (!test_and_set_bit(NF_FLOW_TEARDOWN, &flow->flags))
 		flow_offload_fixup_ct(flow);
+	nf_flow_clients_deactivate(flow);
 }
 EXPORT_SYMBOL_GPL(flow_offload_teardown);
 
@@ -593,6 +672,8 @@ static void nf_flow_offload_gc_step(struct nf_flowtable *flow_table,
 		nf_flow_table_extend_ct_timeout(flow->ct);
 	}
 
+	if (teardown || test_bit(NF_FLOW_CLOSING, &flow->flags))
+		nf_flow_clients_deactivate(flow);
 	if (teardown) {
 		if (test_bit(NF_FLOW_HW, &flow->flags)) {
 			if (!test_bit(NF_FLOW_HW_DYING, &flow->flags))
@@ -607,7 +688,15 @@ static void nf_flow_offload_gc_step(struct nf_flowtable *flow_table,
 		   !test_bit(NF_FLOW_HW_DYING, &flow->flags)) {
 		nf_flow_offload_del(flow_table, flow);
 	} else if (test_bit(NF_FLOW_HW, &flow->flags)) {
-		nf_flow_offload_stats(flow_table, flow);
+		/* Reuse the existing GC tick for due retries, even on idle peers. */
+		nf_flow_offload_add(flow_table, flow);
+#ifdef CONFIG_NF_FLOW_TABLE_CLIENT_STATS
+		/* Reuse this GC traversal; proc readers must never walk flows. */
+		if (data)
+			nf_flow_offload_stats_force(flow_table, flow);
+		else
+#endif
+			nf_flow_offload_stats(flow_table, flow);
 	}
 }
 
@@ -619,9 +708,47 @@ void nf_flow_table_gc_run(struct nf_flowtable *flow_table)
 static void nf_flow_offload_work_gc(struct work_struct *work)
 {
 	struct nf_flowtable *flow_table;
+#ifdef CONFIG_NF_FLOW_TABLE_CLIENT_STATS
+	struct net *net;
+	u64 now;
+	bool sample;
+#endif
 
 	flow_table = container_of(work, struct nf_flowtable, gc_work.work);
+#ifdef CONFIG_NF_FLOW_TABLE_CLIENT_STATS
+	net = read_pnet(&flow_table->net);
+	now = ktime_to_ms(ktime_get_boottime());
+	sample = !flow_table->clients_polled_ms ||
+		 now - flow_table->clients_polled_ms >= 3000;
+	if (sample)
+		flow_table->clients_aggregate_stats =
+			nf_flow_offload_stats_aggregate(flow_table);
+	nf_flow_table_iterate(flow_table, nf_flow_offload_gc_step,
+			      sample && !flow_table->clients_aggregate_stats ?
+			      flow_table : NULL);
+	if (sample) {
+		flow_table->clients_polled_ms = now;
+		/* Do not hold flowtable_lock: cleanup can flush this GC work
+		 * while holding that lock. Only serialize the per-net snapshot.
+		 */
+		if (!flow_table->clients_aggregate_stats)
+			nf_flow_offload_stats_flush();
+		mutex_lock(&net->ft.clients_sample_lock);
+		now = ktime_to_ms(ktime_get_boottime());
+		if (!net->ft.clients_sequence ||
+		    now - net->ft.clients_sampled_ms >= 3000) {
+			net->ft.clients_elapsed_ms = net->ft.clients_sequence ?
+				now - net->ft.clients_sampled_ms : 0;
+			nf_flow_clients_sample(net, net->ft.clients_elapsed_ms);
+			net->ft.clients_sampled_ms = now;
+			net->ft.clients_sequence++;
+			net->ft.clients_errors = nf_flow_clients_errors(net);
+		}
+		mutex_unlock(&net->ft.clients_sample_lock);
+	}
+#else
 	nf_flow_table_gc_run(flow_table);
+#endif
 	queue_delayed_work(system_power_efficient_wq, &flow_table->gc_work, HZ);
 }
 
@@ -718,6 +845,9 @@ int nf_flow_table_init(struct nf_flowtable *flowtable)
 	int err;
 
 	INIT_DELAYED_WORK(&flowtable->gc_work, nf_flow_offload_work_gc);
+#ifdef CONFIG_NF_FLOW_TABLE_CLIENT_STATS
+	flowtable->clients_polled_ms = 0;
+#endif
 	flow_block_init(&flowtable->flow_block);
 	init_rwsem(&flowtable->flow_block_lock);
 
@@ -788,14 +918,72 @@ void nf_flow_table_free(struct nf_flowtable *flow_table)
 }
 EXPORT_SYMBOL_GPL(nf_flow_table_free);
 
+#ifdef CONFIG_NF_FLOW_TABLE_PROCFS
+static void
+nf_flow_hw_seq_dump(struct nf_flowtable *table, struct flow_offload *flow, void *data)
+{
+	nf_flow_offload_hw_show(data, table, flow);
+}
+
+int nf_flow_hw_seq_show(struct seq_file *seq, void *v)
+{
+	struct net *net = seq_file_single_net(seq);
+	struct nf_flowtable *table;
+
+	seq_puts(seq, "version=1 retry_unit=ms directions=original,reply\n");
+	mutex_lock(&flowtable_lock);
+	list_for_each_entry(table, &flowtables, list) {
+		if (net_eq(read_pnet(&table->net), net))
+			nf_flow_table_iterate(table, nf_flow_hw_seq_dump, seq);
+	}
+	mutex_unlock(&flowtable_lock);
+	return 0;
+}
+#endif
+
+#ifdef CONFIG_NF_FLOW_TABLE_CLIENT_STATS
+int nf_flow_clients_seq_show(struct seq_file *seq, void *v)
+{
+	/* proc_create_net_single stores struct net directly in private. */
+	struct net *net = seq_file_single_net(seq);
+	u64 now;
+	u32 errors;
+
+	/* Read cached device aggregates only. GC owns periodic HW collection. */
+	mutex_lock(&net->ft.clients_sample_lock);
+	now = ktime_to_ms(ktime_get_boottime());
+	errors = net->ft.clients_errors;
+	seq_printf(seq, "version=1 source=flowtable coverage=offloaded ip_accounting=1 "
+		   "sample=%llu interval_ms=3000 elapsed_ms=%llu "
+		   "sampled_uptime_ms=%llu age_ms=%llu status=%s errors=%u\n",
+		   net->ft.clients_sequence, net->ft.clients_elapsed_ms,
+		   net->ft.clients_sampled_ms, now - net->ft.clients_sampled_ms,
+		   errors ? "partial" : net->ft.clients_elapsed_ms ? "ok" : "warming",
+		   errors);
+	nf_flow_clients_show(seq, net);
+	mutex_unlock(&net->ft.clients_sample_lock);
+	return 0;
+}
+#endif
+
 static int nf_flow_table_init_net(struct net *net)
 {
+#ifdef CONFIG_NF_FLOW_TABLE_CLIENT_STATS
+	mutex_init(&net->ft.clients_sample_lock);
+#endif
 	net->ft.stat = alloc_percpu(struct nf_flow_table_stat);
-	return net->ft.stat ? 0 : -ENOMEM;
+	if (!net->ft.stat)
+		return -ENOMEM;
+	if (nf_flow_clients_init_net(net)) {
+		free_percpu(net->ft.stat);
+		return -ENOMEM;
+	}
+	return 0;
 }
 
 static void nf_flow_table_fini_net(struct net *net)
 {
+	nf_flow_clients_free_net(net);
 	free_percpu(net->ft.stat);
 }
 

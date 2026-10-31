@@ -328,6 +328,7 @@
 /* status register */
 #define REG_STATUS		0xc0
 #define STATUS_BUSY		BIT(0)
+#define STATUS_WEL		BIT(1)
 #define STATUS_ERASE_FAILED	BIT(2)
 #define STATUS_PROG_FAILED	BIT(3)
 #define STATUS_ECC_MASK		GENMASK(5, 4)
@@ -589,6 +590,8 @@ enum spinand_bus_interface {
  * @select_target: function used to select a target/die. Required only for
  *		   multi-die chips
  * @configure_chip: Align the chip configuration with the core settings
+ * @prepare_read_only: establish a chip-specific reset state without writes
+ * @check_read_only: validate chip-specific strict read-only state
  * @set_cont_read: enable/disable continuous cached reads
  * @fact_otp: SPI NAND factory OTP info.
  * @user_otp: SPI NAND user OTP info.
@@ -617,6 +620,8 @@ struct spinand_info {
 			     unsigned int target);
 	int (*configure_chip)(struct spinand_device *spinand,
 			      enum spinand_bus_interface iface);
+	int (*prepare_read_only)(struct spinand_device *spinand);
+	int (*check_read_only)(struct spinand_device *spinand);
 	int (*set_cont_read)(struct spinand_device *spinand,
 			     bool enable);
 	struct spinand_fact_otp fact_otp;
@@ -664,6 +669,12 @@ struct spinand_info {
 
 #define SPINAND_CONFIGURE_CHIP(__configure_chip)			\
 	.configure_chip = __configure_chip
+
+#define SPINAND_PREPARE_READ_ONLY(__prepare_read_only)			\
+	.prepare_read_only = __prepare_read_only
+
+#define SPINAND_CHECK_READ_ONLY(__check_read_only)			\
+	.check_read_only = __check_read_only
 
 #define SPINAND_CONT_READ(__set_cont_read)				\
 	.set_cont_read = __set_cont_read
@@ -767,6 +778,8 @@ struct spinand_mem_ops {
  *		the stack
  * @manufacturer: SPI NAND manufacturer information
  * @configure_chip: Align the chip configuration with the core settings
+ * @prepare_read_only: establish a chip-specific reset state without writes
+ * @check_read_only: validate chip-specific strict read-only state
  * @cont_read_possible: Field filled by the core once the whole system
  *		configuration is known to tell whether continuous reads are
  *		suitable to use or not in general with this chip/configuration.
@@ -778,10 +791,14 @@ struct spinand_mem_ops {
  * @user_otp: SPI NAND user OTP info.
  * @read_retries: the number of read retry modes supported
  * @set_read_retry: Enable/disable the read retry feature
+ * @strict_read_only: reject operations mutating device state
+ * @read_ready: validated read-only configuration after reset
  * @set_randomizer: Enable/disable the randomizer feature
  */
 struct spinand_device {
 	struct nand_device base;
+	bool strict_read_only;
+	bool read_ready;
 	struct spi_mem *spimem;
 	struct mutex lock;
 	struct spinand_id id;
@@ -809,6 +826,8 @@ struct spinand_device {
 
 	int (*configure_chip)(struct spinand_device *spinand,
 			      enum spinand_bus_interface iface);
+	int (*prepare_read_only)(struct spinand_device *spinand);
+	int (*check_read_only)(struct spinand_device *spinand);
 	bool cont_read_possible;
 	int (*set_cont_read)(struct spinand_device *spinand,
 			     bool enable);

@@ -47,3 +47,5 @@ obj-$(CONFIG_NET_DSA_TAG_YT921X) += tag_yt921x.o
 
 # for tracing framework to find trace.h
 CFLAGS_trace.o := -I$(src)
+
+obj-$(CONFIG_NET_DSA_TAG_ZX279133_RTL8372N) += tag_zx279133_rtl8372n.o

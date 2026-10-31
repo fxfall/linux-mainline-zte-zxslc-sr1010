@@ -11,13 +11,16 @@ maintainers:
 
 description: |
   ARM platforms using SoCs designed by ZTE. Currently this supports devices
-  based on the zx297520v3 SoC which is found in LTE routers.
+  based on zx297520v3 and zx279133 SoCs.
 
 properties:
   $nodename:
     const: "/"
   compatible:
     oneOf:
+      - items:
+          - const: zte,zx279133-sr1010
+          - const: zte,zx279133
       - items:
           - enum:
               - dlink,dwr932m

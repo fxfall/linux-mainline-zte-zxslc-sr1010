@@ -108,12 +108,14 @@ int nanddev_bbt_set_block_status(struct nand_device *nand, unsigned int entry,
 	unsigned long *pos = nand->bbt.cache +
 			     ((entry * bits_per_block) / BITS_PER_LONG);
 	unsigned int offs = (entry * bits_per_block) % BITS_PER_LONG;
-	unsigned long val = status & GENMASK(bits_per_block - 1, 0);
+	unsigned long mask = GENMASK(bits_per_block - 1, 0);
+	unsigned long val = status & mask;
 
 	if (entry >= nanddev_neraseblocks(nand))
 		return -ERANGE;
 
-	pos[0] &= ~GENMASK(offs + bits_per_block - 1, offs);
+	/* Bits beyond BITS_PER_LONG are handled in pos[1] below. */
+	pos[0] &= ~(mask << offs);
 	pos[0] |= val << offs;
 
 	if (bits_per_block + offs > BITS_PER_LONG) {

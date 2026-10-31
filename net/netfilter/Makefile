@@ -244,3 +244,5 @@ obj-$(CONFIG_LWTUNNEL) += nf_hooks_lwtunnel.o
 ifdef CONFIG_GCOV_PROFILE_NETFILTER
 GCOV_PROFILE := y
 endif
+
+nf_flow_table-$(CONFIG_NF_FLOW_TABLE_CLIENT_STATS) += nf_flow_table_clients.o

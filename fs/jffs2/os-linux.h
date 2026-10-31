@@ -73,6 +73,7 @@ static inline void jffs2_init_inode_info(struct jffs2_inode_info *f)
 #endif
 
 #define jffs2_is_writebuffered(c) (0)
+#define jffs2_nand(c) (0)
 #define jffs2_cleanmarker_oob(c) (0)
 #define jffs2_write_nand_cleanmarker(c,jeb) (-EIO)
 
@@ -108,7 +109,15 @@ static inline void jffs2_init_inode_info(struct jffs2_inode_info *f)
 #define jffs2_can_mark_obsolete(c) (c->mtd->flags & (MTD_BIT_WRITEABLE))
 #endif
 
-#define jffs2_cleanmarker_oob(c) (c->mtd->type == MTD_NANDFLASH)
+#define jffs2_nand(c) (c->mtd->type == MTD_NANDFLASH)
+
+/*
+ * NAND keeps the clean marker in the OOB, programmed apart from the data of
+ * the first page. A page that can be programmed only once cannot take it
+ * there: it gets a clean marker in the data area instead (see
+ * jffs2_nand_flash_setup()).
+ */
+#define jffs2_cleanmarker_oob(c) (jffs2_nand(c) && !(c)->mtd->program_once)
 
 #define jffs2_wbuf_dirty(c) (!!(c)->wbuf_len)
 
