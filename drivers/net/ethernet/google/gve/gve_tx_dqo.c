@@ -276,9 +276,8 @@ static int gve_tx_qpl_buf_init(struct gve_tx_ring *tx)
 		tx->dqo.qpl->num_entries;
 	int i;
 
-	tx->dqo.tx_qpl_buf_next = kvcalloc(num_tx_qpl_bufs,
-					   sizeof(tx->dqo.tx_qpl_buf_next[0]),
-					   GFP_KERNEL);
+	tx->dqo.tx_qpl_buf_next = kvzalloc_objs(tx->dqo.tx_qpl_buf_next[0],
+						num_tx_qpl_bufs);
 	if (!tx->dqo.tx_qpl_buf_next)
 		return -ENOMEM;
 
@@ -312,7 +311,6 @@ static int gve_tx_alloc_ring_dqo(struct gve_priv *priv,
 {
 	struct device *hdev = &priv->pdev->dev;
 	int num_pending_packets;
-	int qpl_page_cnt;
 	size_t bytes;
 	u32 qpl_id;
 	int i;
@@ -347,9 +345,8 @@ static int gve_tx_alloc_ring_dqo(struct gve_priv *priv,
 	num_pending_packets /= 2;
 
 	tx->dqo.num_pending_packets = min_t(int, num_pending_packets, S16_MAX);
-	tx->dqo.pending_packets = kvcalloc(tx->dqo.num_pending_packets,
-					   sizeof(tx->dqo.pending_packets[0]),
-					   GFP_KERNEL);
+	tx->dqo.pending_packets = kvzalloc_objs(tx->dqo.pending_packets[0],
+						tx->dqo.num_pending_packets);
 	if (!tx->dqo.pending_packets)
 		goto err;
 
@@ -394,10 +391,9 @@ static int gve_tx_alloc_ring_dqo(struct gve_priv *priv,
 
 	if (!cfg->raw_addressing) {
 		qpl_id = gve_tx_qpl_id(priv, tx->q_num);
-		qpl_page_cnt = priv->tx_pages_per_qpl;
 
 		tx->dqo.qpl = gve_alloc_queue_page_list(priv, qpl_id,
-							qpl_page_cnt);
+							cfg->pages_per_qpl);
 		if (!tx->dqo.qpl)
 			goto err;
 
@@ -427,8 +423,7 @@ int gve_tx_alloc_rings_dqo(struct gve_priv *priv,
 		return -EINVAL;
 	}
 
-	tx = kvcalloc(cfg->qcfg->max_queues, sizeof(struct gve_tx_ring),
-		      GFP_KERNEL);
+	tx = kvzalloc_objs(struct gve_tx_ring, cfg->qcfg->max_queues);
 	if (!tx)
 		return -ENOMEM;
 
@@ -575,34 +570,52 @@ static void gve_tx_fill_pkt_desc_dqo(struct gve_tx_ring *tx, u32 *desc_idx,
  */
 static int gve_prep_tso(struct sk_buff *skb)
 {
+	struct skb_shared_info *shinfo = skb_shinfo(skb);
+	u32 paylen, l4_start;
 	struct tcphdr *tcp;
+	struct udphdr *udp;
 	int header_len;
-	u32 paylen;
 	int err;
 
-	/* Note: HW requires MSS (gso_size) to be <= 9728 and the total length
-	 * of the TSO to be <= 262143.
+	/* Note: HW requires the total length of the TSO to be <= 262143,
+	 * this is enforced by netif_set_tso_max_size().
 	 *
-	 * However, we don't validate these because:
-	 * - Hypervisor enforces a limit of 9K MTU
-	 * - Kernel will not produce a TSO larger than 64k
+	 * MSS (gso_size) can not be trusted: packets forwarded from a tap or
+	 * injected by a packet socket can carry an arbitrary value, while the
+	 * mss field of the TSO context descriptor is only 14 bits wide.
+	 *
+	 * A too big MSS is dropped here instead of being rejected from
+	 * gve_features_check_dqo(), because software segmentation would
+	 * produce packets larger than the device can send.
 	 */
-
-	if (unlikely(skb_shinfo(skb)->gso_size < GVE_TX_MIN_TSO_MSS_DQO))
+	if (unlikely(shinfo->gso_size > GVE_TX_MAX_TSO_MSS_DQO))
 		return -1;
-
-	if (!(skb_shinfo(skb)->gso_type & (SKB_GSO_TCPV4 | SKB_GSO_TCPV6)))
-		return -EINVAL;
 
 	/* Needed because we will modify header. */
 	err = skb_cow_head(skb, 0);
 	if (err < 0)
 		return err;
+	shinfo = skb_shinfo(skb);
 
-	tcp = tcp_hdr(skb);
-	paylen = skb->len - skb_transport_offset(skb);
-	csum_replace_by_diff(&tcp->check, (__force __wsum)htonl(paylen));
-	header_len = skb_tcp_all_headers(skb);
+	l4_start = skb_transport_offset(skb);
+	paylen = skb->len - l4_start;
+
+	/* gso_type is a bitmask: SKB_GSO_DODGY, SKB_GSO_TCP_ECN and
+	 * SKB_GSO_TCP_FIXEDID may be set alongside the protocol bit.
+	 */
+	if (shinfo->gso_type & (SKB_GSO_TCPV4 | SKB_GSO_TCPV6)) {
+		tcp = tcp_hdr(skb);
+		csum_replace_by_diff(&tcp->check,
+				     (__force __wsum)htonl(paylen));
+		header_len = skb_tcp_all_headers(skb);
+	} else if (shinfo->gso_type & SKB_GSO_UDP_L4) {
+		udp = udp_hdr(skb);
+		csum_replace_by_diff(&udp->check,
+				     (__force __wsum)htonl(paylen));
+		header_len = sizeof(struct udphdr) + l4_start;
+	} else {
+		return -EINVAL;
+	}
 
 	if (unlikely(header_len > GVE_TX_MAX_HDR_SIZE_DQO))
 		return -EINVAL;
@@ -908,12 +921,21 @@ static bool gve_can_send_tso(const struct sk_buff *skb)
 {
 	const int max_bufs_per_seg = GVE_TX_MAX_DATA_DESCS - 1;
 	const struct skb_shared_info *shinfo = skb_shinfo(skb);
-	const int header_len = skb_tcp_all_headers(skb);
 	const int gso_size = shinfo->gso_size;
 	int cur_seg_num_bufs;
 	int prev_frag_size;
 	int cur_seg_size;
+	int header_len;
 	int i;
+
+	if (unlikely(gso_size < GVE_TX_MIN_TSO_MSS_DQO))
+		return false;
+
+	/* Must match the header length programmed by gve_prep_tso(). */
+	if (skb_is_gso_tcp(skb))
+		header_len = skb_tcp_all_headers(skb);
+	else
+		header_len = skb_transport_offset(skb) + sizeof(struct udphdr);
 
 	cur_seg_size = skb_headlen(skb) - header_len;
 	prev_frag_size = skb_headlen(skb);
@@ -956,7 +978,17 @@ netdev_features_t gve_features_check_dqo(struct sk_buff *skb,
 					 struct net_device *dev,
 					 netdev_features_t features)
 {
-	if (skb_is_gso(skb) && !gve_can_send_tso(skb))
+	if (!skb_is_gso(skb))
+		return features;
+
+	/* Keep the GSO bits for a too big MSS, so that gve_prep_tso() drops
+	 * the packet: software segmentation would give packets larger than
+	 * the device can send.
+	 */
+	if (skb_shinfo(skb)->gso_size > GVE_TX_MAX_TSO_MSS_DQO)
+		return features;
+
+	if (!gve_can_send_tso(skb))
 		return features & ~NETIF_F_GSO_MASK;
 
 	return features;
@@ -972,9 +1004,6 @@ static int gve_try_tx_skb(struct gve_priv *priv, struct gve_tx_ring *tx,
 {
 	int num_buffer_descs;
 	int total_num_descs;
-
-	if (skb_is_gso(skb) && unlikely(ipv6_hopopt_jumbo_remove(skb)))
-		goto drop;
 
 	if (tx->dqo.qpl) {
 		/* We do not need to verify the number of buffers used per
@@ -1012,7 +1041,9 @@ static int gve_try_tx_skb(struct gve_priv *priv, struct gve_tx_ring *tx,
 	return 0;
 
 drop:
+	u64_stats_update_begin(&tx->statss);
 	tx->dropped_pkt++;
+	u64_stats_update_end(&tx->statss);
 	dev_kfree_skb_any(skb);
 	return 0;
 }
@@ -1318,7 +1349,11 @@ static void remove_miss_completions(struct gve_priv *priv,
 		/* This indicates the packet was dropped. */
 		dev_kfree_skb_any(pending_packet->skb);
 		pending_packet->skb = NULL;
+
+		u64_stats_update_begin(&tx->statss);
 		tx->dropped_pkt++;
+		u64_stats_update_end(&tx->statss);
+
 		net_err_ratelimited("%s: No reinjection completion was received for: %d.\n",
 				    priv->dev->name,
 				    (int)(pending_packet - tx->dqo.pending_packets));

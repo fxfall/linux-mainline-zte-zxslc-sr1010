@@ -5,7 +5,6 @@
  */
 #include <linux/clk.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/slab.h>
@@ -329,8 +328,6 @@ static int vdec_s_fmt(struct file *file, void *fh, struct v4l2_format *f)
 	struct vb2_queue *q;
 
 	q = v4l2_m2m_get_vq(inst->m2m_ctx, f->type);
-	if (!q)
-		return -EINVAL;
 
 	if (vb2_is_busy(q))
 		return -EBUSY;
@@ -435,9 +432,13 @@ vdec_g_selection(struct file *file, void *fh, struct v4l2_selection *s)
 static int
 vdec_querycap(struct file *file, void *fh, struct v4l2_capability *cap)
 {
+	struct venus_inst *inst = to_inst(file);
+	struct venus_core *core = inst->core;
+
 	strscpy(cap->driver, "qcom-venus", sizeof(cap->driver));
 	strscpy(cap->card, "Qualcomm Venus video decoder", sizeof(cap->card));
-	strscpy(cap->bus_info, "platform:qcom-venus", sizeof(cap->bus_info));
+	snprintf(cap->bus_info, sizeof(cap->bus_info),
+		 "plat:%s:dec", dev_name(core->dev));
 
 	return 0;
 }
@@ -1682,7 +1683,7 @@ static int vdec_open(struct file *file)
 	struct venus_inst *inst;
 	int ret;
 
-	inst = kzalloc(sizeof(*inst), GFP_KERNEL);
+	inst = kzalloc_obj(*inst);
 	if (!inst)
 		return -ENOMEM;
 
@@ -1784,12 +1785,9 @@ static int vdec_probe(struct platform_device *pdev)
 	struct venus_core *core;
 	int ret;
 
-	if (!dev->parent)
-		return -EPROBE_DEFER;
-
 	core = dev_get_drvdata(dev->parent);
 	if (!core)
-		return -EPROBE_DEFER;
+		return -EINVAL;
 
 	platform_set_drvdata(pdev, core);
 
@@ -1888,6 +1886,5 @@ static struct platform_driver qcom_venus_dec_driver = {
 };
 module_platform_driver(qcom_venus_dec_driver);
 
-MODULE_ALIAS("platform:qcom-venus-decoder");
 MODULE_DESCRIPTION("Qualcomm Venus video decoder driver");
 MODULE_LICENSE("GPL v2");

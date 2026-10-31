@@ -110,7 +110,7 @@ void ish_event_tracer(struct ishtp_device *dev, const char *format, ...)
 		vsnprintf(tmp_buf, sizeof(tmp_buf), format, args);
 		va_end(args);
 
-		trace_ishtp_dump(tmp_buf);
+		trace_call__ishtp_dump(tmp_buf);
 	}
 }
 
@@ -159,6 +159,12 @@ static inline bool ish_should_enter_d0i3(struct pci_dev *pdev)
 
 static inline bool ish_should_leave_d0i3(struct pci_dev *pdev)
 {
+	struct ishtp_device *dev = pci_get_drvdata(pdev);
+	u32 fwsts = dev->ops->get_fw_status(dev);
+
+	if (dev->suspend_flag || !IPC_IS_ISH_ILUP(fwsts))
+		return false;
+
 	return !pm_resume_via_firmware() || pdev->device == PCI_DEVICE_ID_INTEL_ISH_CHV;
 }
 
@@ -226,10 +232,8 @@ static int ish_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	ret = devm_request_irq(dev, pdev->irq, ish_irq_handler,
 			       irq_flag, KBUILD_MODNAME, ishtp);
-	if (ret) {
-		dev_err(dev, "ISH: request IRQ %d failed\n", pdev->irq);
+	if (ret)
 		return ret;
-	}
 
 	dev_set_drvdata(ishtp->devc, ishtp);
 
@@ -289,10 +293,8 @@ static void __maybe_unused ish_resume_handler(struct work_struct *work)
 {
 	struct pci_dev *pdev = to_pci_dev(ish_resume_device);
 	struct ishtp_device *dev = pci_get_drvdata(pdev);
-	uint32_t fwsts = dev->ops->get_fw_status(dev);
 
-	if (ish_should_leave_d0i3(pdev) && !dev->suspend_flag
-			&& IPC_IS_ISH_ILUP(fwsts)) {
+	if (ish_should_leave_d0i3(pdev)) {
 		if (device_may_wakeup(&pdev->dev))
 			disable_irq_wake(pdev->irq);
 
@@ -396,12 +398,29 @@ static int __maybe_unused ish_resume(struct device *device)
 	ish_resume_device = device;
 	dev->resume_flag = 1;
 
+	/* If ISH resume from D3, reset ishtp clients before return */
+	if (!ish_should_leave_d0i3(pdev))
+		ishtp_reset_handler(dev);
+
 	queue_work(dev->unbound_wq, &resume_work);
 
 	return 0;
 }
 
-static SIMPLE_DEV_PM_OPS(ish_pm_ops, ish_suspend, ish_resume);
+static int __maybe_unused ish_freeze(struct device *device)
+{
+	struct pci_dev *pdev = to_pci_dev(device);
+
+	return pci_save_state(pdev);
+}
+
+static const struct dev_pm_ops __maybe_unused ish_pm_ops = {
+	.suspend = pm_sleep_ptr(ish_suspend),
+	.resume = pm_sleep_ptr(ish_resume),
+	.freeze = pm_sleep_ptr(ish_freeze),
+	.restore = pm_sleep_ptr(ish_resume),
+	.poweroff = pm_sleep_ptr(ish_suspend),
+};
 
 static ssize_t base_version_show(struct device *cdev,
 				 struct device_attribute *attr, char *buf)

@@ -480,11 +480,9 @@ int xt_check_proc_name(const char *name, unsigned int size)
 }
 EXPORT_SYMBOL(xt_check_proc_name);
 
-int xt_check_match(struct xt_mtchk_param *par,
-		   unsigned int size, u16 proto, bool inv_proto)
+static int xt_check_match_common(struct xt_mtchk_param *par,
+				 unsigned int size, u16 proto, bool inv_proto)
 {
-	int ret;
-
 	if (XT_ALIGN(par->match->matchsize) != size &&
 	    par->match->matchsize != -1) {
 		/*
@@ -533,6 +531,14 @@ int xt_check_match(struct xt_mtchk_param *par,
 				    par->match->proto);
 		return -EINVAL;
 	}
+
+	return 0;
+}
+
+static int xt_checkentry_match(struct xt_mtchk_param *par)
+{
+	int ret;
+
 	if (par->match->checkentry != NULL) {
 		ret = par->match->checkentry(par);
 		if (ret < 0)
@@ -541,7 +547,33 @@ int xt_check_match(struct xt_mtchk_param *par,
 			/* Flag up potential errors. */
 			return -EIO;
 	}
+
 	return 0;
+}
+
+int xt_check_hooks_match(struct xt_mtchk_param *par)
+{
+	if (par->match->check_hooks != NULL)
+		return par->match->check_hooks(par);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(xt_check_hooks_match);
+
+int xt_check_match(struct xt_mtchk_param *par,
+		   unsigned int size, u16 proto, bool inv_proto)
+{
+	int ret;
+
+	ret = xt_check_match_common(par, size, proto, inv_proto);
+	if (ret < 0)
+		return ret;
+
+	ret = xt_check_hooks_match(par);
+	if (ret < 0)
+		return ret;
+
+	return xt_checkentry_match(par);
 }
 EXPORT_SYMBOL_GPL(xt_check_match);
 
@@ -822,13 +854,17 @@ EXPORT_SYMBOL_GPL(xt_compat_match_to_user);
 
 /* non-compat version may have padding after verdict */
 struct compat_xt_standard_target {
-	struct compat_xt_entry_target t;
-	compat_uint_t verdict;
+	/* Must be last as it ends in a flexible-array member. */
+	TRAILING_OVERLAP(struct compat_xt_entry_target, t, data,
+		compat_uint_t verdict;
+	);
 };
 
 struct compat_xt_error_target {
-	struct compat_xt_entry_target t;
-	char errorname[XT_FUNCTION_MAXNAMELEN];
+	/* Must be last as it ends in a flexible-array member. */
+	TRAILING_OVERLAP(struct compat_xt_entry_target, t, data,
+		char errorname[XT_FUNCTION_MAXNAMELEN];
+	);
 };
 
 int xt_compat_check_entry_offsets(const void *base, const char *elems,
@@ -1011,11 +1047,9 @@ bool xt_find_jump_offset(const unsigned int *offsets,
 }
 EXPORT_SYMBOL(xt_find_jump_offset);
 
-int xt_check_target(struct xt_tgchk_param *par,
-		    unsigned int size, u16 proto, bool inv_proto)
+static int xt_check_target_common(struct xt_tgchk_param *par,
+				  unsigned int size, u16 proto, bool inv_proto)
 {
-	int ret;
-
 	if (XT_ALIGN(par->target->targetsize) != size) {
 		pr_err_ratelimited("%s_tables: %s.%u target: invalid size %u (kernel) != (user) %u\n",
 				   xt_prefix[par->family], par->target->name,
@@ -1060,6 +1094,23 @@ int xt_check_target(struct xt_tgchk_param *par,
 				    par->target->proto);
 		return -EINVAL;
 	}
+
+	return 0;
+}
+
+int xt_check_hooks_target(struct xt_tgchk_param *par)
+{
+	if (par->target->check_hooks != NULL)
+		return par->target->check_hooks(par);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(xt_check_hooks_target);
+
+static int xt_checkentry_target(struct xt_tgchk_param *par)
+{
+	int ret;
+
 	if (par->target->checkentry != NULL) {
 		ret = par->target->checkentry(par);
 		if (ret < 0)
@@ -1069,6 +1120,22 @@ int xt_check_target(struct xt_tgchk_param *par,
 			return -EIO;
 	}
 	return 0;
+}
+
+int xt_check_target(struct xt_tgchk_param *par,
+		    unsigned int size, u16 proto, bool inv_proto)
+{
+	int ret;
+
+	ret = xt_check_target_common(par, size, proto, inv_proto);
+	if (ret < 0)
+		return ret;
+
+	ret = xt_check_hooks_target(par);
+	if (ret < 0)
+		return ret;
+
+	return xt_checkentry_target(par);
 }
 EXPORT_SYMBOL_GPL(xt_check_target);
 
@@ -1408,11 +1475,9 @@ struct xt_counters *xt_counters_alloc(unsigned int counters)
 }
 EXPORT_SYMBOL(xt_counters_alloc);
 
-struct xt_table_info *
-xt_replace_table(struct xt_table *table,
-	      unsigned int num_counters,
-	      struct xt_table_info *newinfo,
-	      int *error)
+static struct xt_table_info *
+do_replace_table(struct xt_table *table, unsigned int num_counters,
+		 struct xt_table_info *newinfo, int *error)
 {
 	struct xt_table_info *private;
 	unsigned int cpu;
@@ -1467,30 +1532,54 @@ xt_replace_table(struct xt_table *table,
 		}
 	}
 
-	audit_log_nfcfg(table->name, table->af, private->number,
-			!private->number ? AUDIT_XT_OP_REGISTER :
-					   AUDIT_XT_OP_REPLACE,
-			GFP_KERNEL);
+	return private;
+}
+
+struct xt_table_info *
+xt_replace_table(struct xt_table *table, unsigned int num_counters,
+		 struct xt_table_info *newinfo,
+		 int *error)
+{
+	struct xt_table_info *private;
+
+	private = do_replace_table(table, num_counters, newinfo, error);
+	if (private)
+		audit_log_nfcfg(table->name, table->af, private->number,
+				AUDIT_XT_OP_REPLACE,
+				GFP_KERNEL);
+
 	return private;
 }
 EXPORT_SYMBOL_GPL(xt_replace_table);
 
 struct xt_table *xt_register_table(struct net *net,
 				   const struct xt_table *input_table,
+				   const struct nf_hook_ops *template_ops,
 				   struct xt_table_info *bootstrap,
 				   struct xt_table_info *newinfo)
 {
 	struct xt_pernet *xt_net = net_generic(net, xt_pernet_id);
+	struct xt_table *t, *table = NULL;
+	struct nf_hook_ops *ops = NULL;
 	struct xt_table_info *private;
-	struct xt_table *t, *table;
-	int ret;
+	unsigned int num_ops;
+	int ret = -EINVAL;
+
+	num_ops = hweight32(input_table->valid_hooks);
+	if (num_ops == 0)
+		goto out;
+
+	ret = -ENOMEM;
+	if (template_ops) {
+		ops = kmemdup_array(template_ops, num_ops, sizeof(*ops), GFP_KERNEL);
+		if (!ops)
+			goto out;
+	}
 
 	/* Don't add one object to multiple lists. */
 	table = kmemdup(input_table, sizeof(struct xt_table), GFP_KERNEL);
-	if (!table) {
-		ret = -ENOMEM;
+	if (!table)
 		goto out;
-	}
 
 	mutex_lock(&xt[table->af].mutex);
 	/* Don't autoload: we'd eat our tail... */
@@ -1504,7 +1593,7 @@ struct xt_table *xt_register_table(struct net *net,
 	/* Simplifies replace_table code. */
 	table->private = bootstrap;
 
-	if (!xt_replace_table(table, 0, newinfo, &ret))
+	if (!do_replace_table(table, 0, newinfo, &ret))
 		goto unlock;
 
 	private = table->private;
@@ -1513,14 +1602,37 @@ struct xt_table *xt_register_table(struct net *net,
 	/* save number of initial entries */
 	private->initial_entries = private->number;
 
+	if (ops) {
+		int i;
+
+		for (i = 0; i < num_ops; i++)
+			ops[i].priv = table;
+
+		ret = nf_register_net_hooks(net, ops, num_ops);
+		if (ret != 0) {
+			mutex_unlock(&xt[table->af].mutex);
+			/* nf_register_net_hooks() might have published a
+			 * base chain before internal error unwind.
+			 */
+			synchronize_rcu();
+			goto out;
+		}
+
+		table->ops = ops;
+	}
+
+	audit_log_nfcfg(table->name, table->af, private->number,
+			AUDIT_XT_OP_REGISTER, GFP_KERNEL);
+
 	list_add(&table->list, &xt_net->tables[table->af]);
 	mutex_unlock(&xt[table->af].mutex);
 	return table;
 
 unlock:
 	mutex_unlock(&xt[table->af].mutex);
-	kfree(table);
 out:
+	kfree(table);
+	kfree(ops);
 	return ERR_PTR(ret);
 }
 EXPORT_SYMBOL_GPL(xt_register_table);
@@ -1808,9 +1920,9 @@ static const struct seq_operations xt_target_seq_ops = {
 	.show	= xt_target_seq_show,
 };
 
-#define FORMAT_TABLES	"_tables_names"
-#define	FORMAT_MATCHES	"_tables_matches"
-#define FORMAT_TARGETS 	"_tables_targets"
+#define FORMAT_TABLES	"%s_tables_names"
+#define	FORMAT_MATCHES	"%s_tables_matches"
+#define FORMAT_TARGETS	"%s_tables_targets"
 
 #endif /* CONFIG_PROC_FS */
 
@@ -1833,7 +1945,7 @@ xt_hook_ops_alloc(const struct xt_table *table, nf_hookfn *fn)
 	if (!num_hooks)
 		return ERR_PTR(-EINVAL);
 
-	ops = kcalloc(num_hooks, sizeof(*ops), GFP_KERNEL);
+	ops = kzalloc_objs(*ops, num_hooks);
 	if (ops == NULL)
 		return ERR_PTR(-ENOMEM);
 
@@ -1866,7 +1978,7 @@ int xt_register_template(const struct xt_table *table,
 	}
 
 	ret = -ENOMEM;
-	t = kzalloc(sizeof(*t), GFP_KERNEL);
+	t = kzalloc_obj(*t);
 	if (!t)
 		goto out_unlock;
 
@@ -1921,8 +2033,7 @@ int xt_proto_init(struct net *net, u_int8_t af)
 	root_uid = make_kuid(net->user_ns, 0);
 	root_gid = make_kgid(net->user_ns, 0);
 
-	strscpy(buf, xt_prefix[af], sizeof(buf));
-	strlcat(buf, FORMAT_TABLES, sizeof(buf));
+	snprintf(buf, sizeof(buf), FORMAT_TABLES, xt_prefix[af]);
 	proc = proc_create_net_data(buf, 0440, net->proc_net, &xt_table_seq_ops,
 			sizeof(struct seq_net_private),
 			(void *)(unsigned long)af);
@@ -1931,8 +2042,7 @@ int xt_proto_init(struct net *net, u_int8_t af)
 	if (uid_valid(root_uid) && gid_valid(root_gid))
 		proc_set_user(proc, root_uid, root_gid);
 
-	strscpy(buf, xt_prefix[af], sizeof(buf));
-	strlcat(buf, FORMAT_MATCHES, sizeof(buf));
+	snprintf(buf, sizeof(buf), FORMAT_MATCHES, xt_prefix[af]);
 	proc = proc_create_seq_private(buf, 0440, net->proc_net,
 			&xt_match_seq_ops, sizeof(struct nf_mttg_trav),
 			(void *)(unsigned long)af);
@@ -1941,8 +2051,7 @@ int xt_proto_init(struct net *net, u_int8_t af)
 	if (uid_valid(root_uid) && gid_valid(root_gid))
 		proc_set_user(proc, root_uid, root_gid);
 
-	strscpy(buf, xt_prefix[af], sizeof(buf));
-	strlcat(buf, FORMAT_TARGETS, sizeof(buf));
+	snprintf(buf, sizeof(buf), FORMAT_TARGETS, xt_prefix[af]);
 	proc = proc_create_seq_private(buf, 0440, net->proc_net,
 			 &xt_target_seq_ops, sizeof(struct nf_mttg_trav),
 			 (void *)(unsigned long)af);
@@ -1956,13 +2065,11 @@ int xt_proto_init(struct net *net, u_int8_t af)
 
 #ifdef CONFIG_PROC_FS
 out_remove_matches:
-	strscpy(buf, xt_prefix[af], sizeof(buf));
-	strlcat(buf, FORMAT_MATCHES, sizeof(buf));
+	snprintf(buf, sizeof(buf), FORMAT_MATCHES, xt_prefix[af]);
 	remove_proc_entry(buf, net->proc_net);
 
 out_remove_tables:
-	strscpy(buf, xt_prefix[af], sizeof(buf));
-	strlcat(buf, FORMAT_TABLES, sizeof(buf));
+	snprintf(buf, sizeof(buf), FORMAT_TABLES, xt_prefix[af]);
 	remove_proc_entry(buf, net->proc_net);
 out:
 	return -1;
@@ -1975,16 +2082,13 @@ void xt_proto_fini(struct net *net, u_int8_t af)
 #ifdef CONFIG_PROC_FS
 	char buf[XT_FUNCTION_MAXNAMELEN];
 
-	strscpy(buf, xt_prefix[af], sizeof(buf));
-	strlcat(buf, FORMAT_TABLES, sizeof(buf));
+	snprintf(buf, sizeof(buf), FORMAT_TABLES, xt_prefix[af]);
 	remove_proc_entry(buf, net->proc_net);
 
-	strscpy(buf, xt_prefix[af], sizeof(buf));
-	strlcat(buf, FORMAT_TARGETS, sizeof(buf));
+	snprintf(buf, sizeof(buf), FORMAT_TARGETS, xt_prefix[af]);
 	remove_proc_entry(buf, net->proc_net);
 
-	strscpy(buf, xt_prefix[af], sizeof(buf));
-	strlcat(buf, FORMAT_MATCHES, sizeof(buf));
+	snprintf(buf, sizeof(buf), FORMAT_MATCHES, xt_prefix[af]);
 	remove_proc_entry(buf, net->proc_net);
 #endif /*CONFIG_PROC_FS*/
 }
@@ -2088,7 +2192,7 @@ static int __init xt_init(void)
 		}
 	}
 
-	xt = kcalloc(NFPROTO_NUMPROTO, sizeof(struct xt_af), GFP_KERNEL);
+	xt = kzalloc_objs(struct xt_af, NFPROTO_NUMPROTO);
 	if (!xt)
 		return -ENOMEM;
 

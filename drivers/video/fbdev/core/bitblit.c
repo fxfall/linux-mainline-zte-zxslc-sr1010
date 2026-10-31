@@ -22,8 +22,7 @@
 /*
  * Accelerated handlers.
  */
-static void update_attr(u8 *dst, u8 *src, int attribute,
-			       struct vc_data *vc)
+static void update_attr(u8 *dst, const u8 *src, int attribute, struct vc_data *vc)
 {
 	int i, offset = (vc->vc_font.height < 10) ? 1 : 2;
 	int width = DIV_ROUND_UP(vc->vc_font.width, 8);
@@ -81,7 +80,7 @@ static inline void bit_putcs_aligned(struct vc_data *vc, struct fb_info *info,
 	u16 charmask = vc->vc_hi_font_mask ? 0x1ff : 0xff;
 	unsigned int charcnt = vc->vc_font.charcount;
 	u32 idx = vc->vc_font.width >> 3;
-	u8 *src;
+	const u8 *src;
 
 	while (cnt--) {
 		u16 ch = scr_readw(s++) & charmask;
@@ -120,7 +119,7 @@ static inline void bit_putcs_unaligned(struct vc_data *vc,
 	u32 shift_low = 0, mod = vc->vc_font.width % 8;
 	u32 shift_high = 8;
 	u32 idx = vc->vc_font.width >> 3;
-	u8 *src;
+	const u8 *src;
 
 	while (cnt--) {
 		u16 ch = scr_readw(s++) & charmask;
@@ -267,18 +266,23 @@ static void bit_cursor(struct vc_data *vc, struct fb_info *info, bool enable,
 	int y = real_y(par->p, vc->state.y);
 	int attribute, use_sw = vc->vc_cursor_type & CUR_SW;
 	int err = 1;
-	char *src;
+	const u8 *src;
 
 	cursor.set = 0;
 
 	if (!vc->vc_font.data)
 		return;
 
- 	c = scr_readw((u16 *) vc->vc_pos);
+	c = scr_readw((u16 *) vc->vc_pos);
 	attribute = get_attribute(info, c);
-	src = vc->vc_font.data + ((c & charmask) * (w * vc->vc_font.height));
+	c &= charmask;
 
-	if (par->cursor_state.image.data != src ||
+	/* Clamp to font size, same as bit_putcs_aligned() */
+	if (c >= vc->vc_font.charcount)
+		c = 0;
+	src = vc->vc_font.data + (c * (w * vc->vc_font.height));
+
+	if (par->cursor_state.image.data != (const char *)src ||
 	    par->cursor_reset) {
 		par->cursor_state.image.data = src;
 		cursor.set |= FB_CUR_SETIMAGE;
@@ -330,46 +334,17 @@ static void bit_cursor(struct vc_data *vc, struct fb_info *info, bool enable,
 	    vc->vc_cursor_type != par->p->cursor_shape ||
 	    par->cursor_state.mask == NULL ||
 	    par->cursor_reset) {
-		char *mask = kmalloc_array(w, vc->vc_font.height, GFP_ATOMIC);
-		int cur_height, size, i = 0;
-		u8 msk = 0xff;
+		unsigned char *mask = kmalloc_array(vc->vc_font.height, w, GFP_ATOMIC);
 
 		if (!mask)
 			return;
+		fbcon_fill_cursor_mask(par, vc, mask);
 
 		kfree(par->cursor_state.mask);
-		par->cursor_state.mask = mask;
+		par->cursor_state.mask = (const char *)mask;
 
 		par->p->cursor_shape = vc->vc_cursor_type;
 		cursor.set |= FB_CUR_SETSHAPE;
-
-		switch (CUR_SIZE(par->p->cursor_shape)) {
-		case CUR_NONE:
-			cur_height = 0;
-			break;
-		case CUR_UNDERLINE:
-			cur_height = (vc->vc_font.height < 10) ? 1 : 2;
-			break;
-		case CUR_LOWER_THIRD:
-			cur_height = vc->vc_font.height/3;
-			break;
-		case CUR_LOWER_HALF:
-			cur_height = vc->vc_font.height >> 1;
-			break;
-		case CUR_TWO_THIRDS:
-			cur_height = (vc->vc_font.height << 1)/3;
-			break;
-		case CUR_BLOCK:
-		default:
-			cur_height = vc->vc_font.height;
-			break;
-		}
-		size = (vc->vc_font.height - cur_height) * w;
-		while (size--)
-			mask[i++] = ~msk;
-		size = cur_height * w;
-		while (size--)
-			mask[i++] = msk;
 	}
 
 	par->cursor_state.enable = enable && !use_sw;
@@ -409,16 +384,16 @@ static int bit_update_start(struct fb_info *info)
 	return err;
 }
 
-void fbcon_set_bitops(struct fbcon_par *par)
-{
-	par->bmove = bit_bmove;
-	par->clear = bit_clear;
-	par->putcs = bit_putcs;
-	par->clear_margins = bit_clear_margins;
-	par->cursor = bit_cursor;
-	par->update_start = bit_update_start;
-	par->rotate_font = NULL;
+static const struct fbcon_bitops bit_fbcon_bitops = {
+	.bmove = bit_bmove,
+	.clear = bit_clear,
+	.putcs = bit_putcs,
+	.clear_margins = bit_clear_margins,
+	.cursor = bit_cursor,
+	.update_start = bit_update_start,
+};
 
-	if (par->rotate)
-		fbcon_set_rotate(par);
+void fbcon_set_bitops_ur(struct fbcon_par *par)
+{
+	par->bitops = &bit_fbcon_bitops;
 }

@@ -85,12 +85,8 @@ int zl3073x_out_state_fetch(struct zl3073x_dev *zldev, u8 index)
 	if (rc)
 		return rc;
 
-	rc = zl3073x_read_u32(zldev, ZL_REG_OUTPUT_PHASE_COMP,
-			      &out->phase_comp);
-	if (rc)
-		return rc;
-
-	return rc;
+	return zl3073x_read_u32(zldev, ZL_REG_OUTPUT_PHASE_COMP,
+				&out->phase_comp);
 }
 
 /**
@@ -106,11 +102,31 @@ const struct zl3073x_out *zl3073x_out_state_get(struct zl3073x_dev *zldev,
 	return &zldev->out[index];
 }
 
+/**
+ * zl3073x_out_state_set - commit output state changes to hardware
+ * @zldev: pointer to zl3073x_dev structure
+ * @index: output index to set state for
+ * @out: desired output state
+ *
+ * Validates that invariant fields have not been modified, skips the HW
+ * write if the mutable configuration is unchanged, and otherwise writes
+ * only the changed cfg fields to hardware via the mailbox interface.
+ *
+ * Return: 0 on success, -EINVAL if invariants changed, <0 on HW error
+ */
 int zl3073x_out_state_set(struct zl3073x_dev *zldev, u8 index,
 			  const struct zl3073x_out *out)
 {
 	struct zl3073x_out *dout = &zldev->out[index];
 	int rc;
+
+	/* Reject attempts to change invariant fields (set at fetch only) */
+	if (WARN_ON(memcmp(&dout->inv, &out->inv, sizeof(out->inv))))
+		return -EINVAL;
+
+	/* Skip HW write if configuration hasn't changed */
+	if (!memcmp(&dout->cfg, &out->cfg, sizeof(out->cfg)))
+		return 0;
 
 	guard(mutex)(&zldev->multiop_lock);
 
@@ -146,12 +162,7 @@ int zl3073x_out_state_set(struct zl3073x_dev *zldev, u8 index,
 		return rc;
 
 	/* After successful commit store new state */
-	dout->div = out->div;
-	dout->width = out->width;
-	dout->esync_n_period = out->esync_n_period;
-	dout->esync_n_width = out->esync_n_width;
-	dout->mode = out->mode;
-	dout->phase_comp = out->phase_comp;
+	dout->cfg = out->cfg;
 
 	return 0;
 }

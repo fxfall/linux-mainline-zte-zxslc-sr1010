@@ -496,7 +496,7 @@ static void digital_in_recv_sens_res(struct nfc_digital_dev *ddev, void *arg,
 		goto exit;
 	}
 
-	target = kzalloc(sizeof(struct nfc_target), GFP_KERNEL);
+	target = kzalloc_obj(struct nfc_target);
 	if (!target) {
 		rc = -ENOMEM;
 		goto exit;
@@ -694,7 +694,7 @@ static void digital_in_recv_sensb_res(struct nfc_digital_dev *ddev, void *arg,
 	else
 		ddev->target_fsc = digital_ats_fsc[fsci];
 
-	target = kzalloc(sizeof(struct nfc_target), GFP_KERNEL);
+	target = kzalloc_obj(struct nfc_target);
 	if (!target) {
 		rc = -ENOMEM;
 		goto exit;
@@ -777,6 +777,8 @@ static void digital_in_recv_sensf_res(struct nfc_digital_dev *ddev, void *arg,
 	memset(&target, 0, sizeof(struct nfc_target));
 
 	sensf_res = (struct digital_sensf_res *)resp->data;
+
+	resp->len = min_t(unsigned int, resp->len, NFC_SENSF_RES_MAXSIZE);
 
 	memcpy(target.sensf_res, sensf_res, resp->len);
 	target.sensf_res_len = resp->len;
@@ -869,7 +871,7 @@ static void digital_in_recv_iso15693_inv_res(struct nfc_digital_dev *ddev,
 		goto out_free_skb;
 	}
 
-	target = kzalloc(sizeof(*target), GFP_KERNEL);
+	target = kzalloc_obj(*target);
 	if (!target) {
 		rc = -ENOMEM;
 		goto out_free_skb;

@@ -1212,12 +1212,13 @@ static struct xfrm_state * pfkey_msg2xfrm_state(struct net *net,
 				err = -ENOSYS;
 				goto out;
 			}
-			x->calg = kmalloc(sizeof(*x->calg), GFP_KERNEL);
+			x->calg = kmalloc_obj(*x->calg);
 			if (!x->calg) {
 				err = -ENOMEM;
 				goto out;
 			}
 			strcpy(x->calg->alg_name, a->name);
+			x->calg->alg_key_len = 0;
 			x->props.calgo = sa->sadb_sa_encrypt;
 		} else {
 			int keysize = 0;
@@ -1277,7 +1278,7 @@ static struct xfrm_state * pfkey_msg2xfrm_state(struct net *net,
 		const struct sadb_x_nat_t_type* n_type;
 		struct xfrm_encap_tmpl *natt;
 
-		x->encap = kzalloc(sizeof(*x->encap), GFP_KERNEL);
+		x->encap = kzalloc_obj(*x->encap);
 		if (!x->encap) {
 			err = -ENOMEM;
 			goto out;
@@ -1299,7 +1300,7 @@ static struct xfrm_state * pfkey_msg2xfrm_state(struct net *net,
 		}
 	}
 
-	err = xfrm_init_state(x);
+	err = xfrm_init_state(x, NULL);
 	if (err)
 		goto out;
 
@@ -1871,7 +1872,7 @@ static int pfkey_dump(struct sock *sk, struct sk_buff *skb, const struct sadb_ms
 			mutex_unlock(&pfk->dump_lock);
 			return -EINVAL;
 		}
-		filter = kmalloc(sizeof(*filter), GFP_KERNEL);
+		filter = kmalloc_obj(*filter);
 		if (filter == NULL) {
 			mutex_unlock(&pfk->dump_lock);
 			return -ENOMEM;
@@ -2554,7 +2555,7 @@ static int ipsecrequests_to_migrate(struct sadb_x_ipsecrequest *rq1, int len,
 	if ((mode = pfkey_mode_to_xfrm(rq1->sadb_x_ipsecrequest_mode)) < 0)
 		return -EINVAL;
 	m->mode = mode;
-	m->reqid = rq1->sadb_x_ipsecrequest_reqid;
+	m->old_reqid = rq1->sadb_x_ipsecrequest_reqid;
 
 	return ((int)(rq1->sadb_x_ipsecrequest_len +
 		      rq2->sadb_x_ipsecrequest_len));
@@ -3655,15 +3656,15 @@ static int pfkey_send_migrate(const struct xfrm_selector *sel, u8 dir, u8 type,
 		if (mode < 0)
 			goto err;
 		if (set_ipsecrequest(skb, mp->proto, mode,
-				     (mp->reqid ?  IPSEC_LEVEL_UNIQUE : IPSEC_LEVEL_REQUIRE),
-				     mp->reqid, mp->old_family,
+				     (mp->old_reqid ? IPSEC_LEVEL_UNIQUE : IPSEC_LEVEL_REQUIRE),
+				     mp->old_reqid, mp->old_family,
 				     &mp->old_saddr, &mp->old_daddr) < 0)
 			goto err;
 
 		/* new ipsecrequest */
 		if (set_ipsecrequest(skb, mp->proto, mode,
-				     (mp->reqid ? IPSEC_LEVEL_UNIQUE : IPSEC_LEVEL_REQUIRE),
-				     mp->reqid, mp->new_family,
+				     (mp->old_reqid ? IPSEC_LEVEL_UNIQUE : IPSEC_LEVEL_REQUIRE),
+				     mp->old_reqid, mp->new_family,
 				     &mp->new_saddr, &mp->new_daddr) < 0)
 			goto err;
 	}
@@ -3804,7 +3805,7 @@ static int pfkey_seq_show(struct seq_file *f, void *v)
 	if (v == SEQ_START_TOKEN)
 		seq_printf(f ,"sk       RefCnt Rmem   Wmem   User   Inode\n");
 	else
-		seq_printf(f, "%pK %-6d %-6u %-6u %-6u %-6lu\n",
+		seq_printf(f, "%pK %-6d %-6u %-6u %-6u %-6llu\n",
 			       s,
 			       refcount_read(&s->sk_refcnt),
 			       sk_rmem_alloc_get(s),
@@ -3924,6 +3925,8 @@ static int __init ipsec_pfkey_init(void)
 {
 	int err = proto_register(&key_proto, 0);
 
+	pr_warn_once("PFKEY is deprecated and scheduled to be removed in 2027, "
+	             "please contact the netdev mailing list\n");
 	if (err != 0)
 		goto out;
 

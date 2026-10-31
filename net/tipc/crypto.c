@@ -144,7 +144,7 @@ struct tipc_tfm {
  * @rcu: struct rcu_head
  * @key: the aead key
  * @gen: the key's generation
- * @seqno: the key seqno (cluster scope)
+ * @seqno: the per-key TX nonce counter
  * @refcnt: the key reference counter
  */
 struct tipc_aead {
@@ -190,7 +190,6 @@ struct tipc_crypto_stats {
  * @rekeying_intv: rekeying interval (in minutes)
  * @stats: the crypto statistics
  * @name: the crypto name
- * @sndnxt: the per-peer sndnxt (TX)
  * @timer1: general timer 1 (jiffies)
  * @timer2: general timer 2 (jiffies)
  * @working: the crypto is working or not
@@ -219,7 +218,6 @@ struct tipc_crypto {
 	struct tipc_crypto_stats __percpu *stats;
 	char name[48];
 
-	atomic64_t sndnxt ____cacheline_aligned;
 	unsigned long timer1;
 	unsigned long timer2;
 	union {
@@ -367,17 +365,8 @@ int tipc_aead_key_validate(struct tipc_aead_key *ukey, struct genl_info *info)
  */
 static int tipc_aead_key_generate(struct tipc_aead_key *skey)
 {
-	int rc = 0;
-
-	/* Fill the key's content with a random value via RNG cipher */
-	rc = crypto_get_default_rng();
-	if (likely(!rc)) {
-		rc = crypto_rng_get_bytes(crypto_default_rng, skey->key,
-					  skey->keylen);
-		crypto_put_default_rng();
-	}
-
-	return rc;
+	/* Fill the key's content with a random value via stdrng */
+	return crypto_stdrng_get_bytes(skey->key, skey->keylen);
 }
 
 static struct tipc_aead *tipc_aead_get(struct tipc_aead __rcu *aead)
@@ -524,7 +513,7 @@ static int tipc_aead_init(struct tipc_aead **aead, struct tipc_aead_key *ukey,
 		return -EEXIST;
 
 	/* Allocate a new AEAD */
-	tmp = kzalloc(sizeof(*tmp), GFP_ATOMIC);
+	tmp = kzalloc_obj(*tmp, GFP_ATOMIC);
 	if (unlikely(!tmp))
 		return -ENOMEM;
 
@@ -560,7 +549,7 @@ static int tipc_aead_init(struct tipc_aead **aead, struct tipc_aead_key *ukey,
 			break;
 		}
 
-		tfm_entry = kmalloc(sizeof(*tfm_entry), GFP_KERNEL);
+		tfm_entry = kmalloc_obj(*tfm_entry);
 		if (unlikely(!tfm_entry)) {
 			crypto_free_aead(tfm);
 			err = -ENOMEM;
@@ -637,7 +626,7 @@ static int tipc_aead_clone(struct tipc_aead **dst, struct tipc_aead *src)
 	if (unlikely(*dst))
 		return -EEXIST;
 
-	aead = kzalloc(sizeof(*aead), GFP_ATOMIC);
+	aead = kzalloc_obj(*aead, GFP_ATOMIC);
 	if (unlikely(!aead))
 		return -ENOMEM;
 
@@ -1060,14 +1049,11 @@ static int tipc_ehdr_build(struct net *net, struct tipc_aead *aead,
 	WARN_ON(skb_headroom(skb) < ehsz);
 	ehdr = (struct tipc_ehdr *)skb_push(skb, ehsz);
 
-	/* Obtain a seqno first:
-	 * Use the key seqno (= cluster wise) if dest is unknown or we're in
-	 * cluster key mode, otherwise it's better for a per-peer seqno!
+	/*
+	 * Keep the nonce unique for the lifetime of the TX key,
+	 * including key state changes and peer reconnection.
 	 */
-	if (!__rx || aead->mode == CLUSTER_KEY)
-		seqno = atomic64_inc_return(&aead->seqno);
-	else
-		seqno = atomic64_inc_return(&__rx->sndnxt);
+	seqno = atomic64_inc_return(&aead->seqno);
 
 	/* Revoke the key if seqno is wrapped around */
 	if (unlikely(!seqno))
@@ -1246,7 +1232,6 @@ void tipc_crypto_key_flush(struct tipc_crypto *c)
 	tipc_crypto_key_set_state(c, 0, 0, 0);
 	for (k = KEY_MIN; k <= KEY_MAX; k++)
 		tipc_crypto_key_detach(c->aead[k], &c->lock);
-	atomic64_set(&c->sndnxt, 0);
 	spin_unlock_bh(&c->lock);
 }
 
@@ -1393,8 +1378,6 @@ done:
  * It also considers if peer has no key, then we need to make own master key
  * (if any) taking over i.e. starting grace period and also trigger key
  * distributing process.
- *
- * The "per-peer" sndnxt is also reset when the peer key has switched.
  */
 static void tipc_crypto_key_synch(struct tipc_crypto *rx, struct sk_buff *skb)
 {
@@ -1445,7 +1428,6 @@ static void tipc_crypto_key_synch(struct tipc_crypto *rx, struct sk_buff *skb)
 		if (cur)
 			tipc_aead_users_dec(tx->aead[cur], 0);
 
-		atomic64_set(&rx->sndnxt, 0);
 		/* Mark the point TX key users changed */
 		tx->timer1 = jiffies;
 
@@ -1481,7 +1463,7 @@ int tipc_crypto_start(struct tipc_crypto **crypto, struct net *net,
 		return -EEXIST;
 
 	/* Allocate crypto */
-	c = kzalloc(sizeof(*c), GFP_ATOMIC);
+	c = kzalloc_obj(*c, GFP_ATOMIC);
 	if (!c)
 		return -ENOMEM;
 
@@ -1510,7 +1492,6 @@ int tipc_crypto_start(struct tipc_crypto **crypto, struct net *net,
 	tipc_crypto_key_set_state(c, 0, 0, 0);
 	atomic_set(&c->key_distr, 0);
 	atomic_set(&c->peer_rx_active, 0);
-	atomic64_set(&c->sndnxt, 0);
 	c->timer1 = jiffies;
 	c->timer2 = jiffies;
 	c->rekeying_intv = TIPC_REKEYING_INTV_DEF;

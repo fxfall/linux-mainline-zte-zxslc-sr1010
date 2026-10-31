@@ -470,7 +470,8 @@ void br_fdb_changeaddr(struct net_bridge_port *p, const unsigned char *newaddr)
 	spin_lock_bh(&br->hash_lock);
 	vg = nbp_vlan_group(p);
 	hlist_for_each_entry(f, &br->fdb_list, fdb_node) {
-		if (f->dst == p && test_bit(BR_FDB_LOCAL, &f->flags) &&
+		if (READ_ONCE(f->dst) == p &&
+		    test_bit(BR_FDB_LOCAL, &f->flags) &&
 		    !test_bit(BR_FDB_ADDED_BY_USER, &f->flags)) {
 			/* delete old one */
 			fdb_delete_local(br, p, f);
@@ -878,7 +879,7 @@ void br_fdb_delete_by_port(struct net_bridge *br,
 
 	spin_lock_bh(&br->hash_lock);
 	hlist_for_each_entry_safe(f, tmp, &br->fdb_list, fdb_node) {
-		if (f->dst != p)
+		if (READ_ONCE(f->dst) != p)
 			continue;
 
 		if (!do_all)
@@ -895,35 +896,6 @@ void br_fdb_delete_by_port(struct net_bridge *br,
 	}
 	spin_unlock_bh(&br->hash_lock);
 }
-
-#if IS_ENABLED(CONFIG_ATM_LANE)
-/* Interface used by ATM LANE hook to test
- * if an addr is on some other bridge port */
-int br_fdb_test_addr(struct net_device *dev, unsigned char *addr)
-{
-	struct net_bridge_fdb_entry *fdb;
-	struct net_bridge_port *port;
-	int ret;
-
-	rcu_read_lock();
-	port = br_port_get_rcu(dev);
-	if (!port)
-		ret = 0;
-	else {
-		const struct net_bridge_port *dst = NULL;
-
-		fdb = br_fdb_find_rcu(port->br, addr, 0);
-		if (fdb)
-			dst = READ_ONCE(fdb->dst);
-
-		ret = dst && dst->dev != dev &&
-		      dst->state == BR_STATE_FORWARDING;
-	}
-	rcu_read_unlock();
-
-	return ret;
-}
-#endif /* CONFIG_ATM_LANE */
 
 /*
  * Fill buffer with forwarding table records in
@@ -1542,7 +1514,7 @@ int br_fdb_external_learn_add(struct net_bridge *br, struct net_bridge_port *p,
 
 	trace_br_fdb_external_learn_add(br, p, addr, vid);
 
-	if (locked && (!p || !(p->flags & BR_PORT_MAB)))
+	if (locked && (!p || !test_bit(BR_PORT_MAB_BIT, &p->flags)))
 		return -EINVAL;
 
 	spin_lock_bh(&br->hash_lock);
@@ -1660,7 +1632,7 @@ void br_fdb_clear_offload(const struct net_device *dev, u16 vid)
 
 	spin_lock_bh(&p->br->hash_lock);
 	hlist_for_each_entry(f, &p->br->fdb_list, fdb_node) {
-		if (f->dst == p && f->key.vlan_id == vid)
+		if (READ_ONCE(f->dst) == p && f->key.vlan_id == vid)
 			clear_bit(BR_FDB_OFFLOADED, &f->flags);
 	}
 	spin_unlock_bh(&p->br->hash_lock);

@@ -32,11 +32,20 @@ static void acpbus_trigger_host_to_dsp_swintr(struct acp_dev_data *adata)
 	struct snd_sof_dev *sdev = adata->dev;
 	const struct sof_amd_acp_desc *desc = get_chip_info(sdev->pdata);
 	u32 swintr_trigger;
+	unsigned int swintr_trigger_reg_offset;
 
+	switch (adata->pci_rev) {
+	case ACP7B_PCI_ID:
+	case ACP7F_PCI_ID:
+		swintr_trigger_reg_offset = ACP7X_DSP_SW_INTR_TRIG_OFFSET;
+		break;
+	default:
+		swintr_trigger_reg_offset = DSP_SW_INTR_TRIG_OFFSET;
+	}
 	swintr_trigger = snd_sof_dsp_read(sdev, ACP_DSP_BAR, desc->dsp_intr_base +
-						DSP_SW_INTR_TRIG_OFFSET);
+						swintr_trigger_reg_offset);
 	swintr_trigger |= 0x01;
-	snd_sof_dsp_write(sdev, ACP_DSP_BAR, desc->dsp_intr_base + DSP_SW_INTR_TRIG_OFFSET,
+	snd_sof_dsp_write(sdev, ACP_DSP_BAR, desc->dsp_intr_base + swintr_trigger_reg_offset,
 			  swintr_trigger);
 }
 
@@ -190,15 +199,13 @@ irqreturn_t acp_sof_ipc_irq_thread(int irq, void *context)
 	dsp_ack = snd_sof_dsp_read(sdev, ACP_DSP_BAR, ACP_SCRATCH_REG_0 + dsp_ack_write);
 	if (dsp_ack == ACP_DSP_ACK_SET) {
 		if (likely(sdev->fw_state == SOF_FW_BOOT_COMPLETE)) {
-			spin_lock_irq(&sdev->ipc_lock);
+			guard(spinlock_irq)(&sdev->ipc_lock);
 
 			/* handle immediate reply from DSP core */
 			acp_dsp_ipc_get_reply(sdev);
 			snd_sof_ipc_reply(sdev, 0);
 			/* set the done bit */
 			acp_dsp_ipc_dsp_done(sdev);
-
-			spin_unlock_irq(&sdev->ipc_lock);
 		} else {
 			dev_dbg_ratelimited(sdev->dev, "IPC reply before FW_BOOT_COMPLETE: %#x\n",
 					    dsp_ack);

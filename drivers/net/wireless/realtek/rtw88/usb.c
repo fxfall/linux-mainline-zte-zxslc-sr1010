@@ -404,7 +404,7 @@ static bool rtw_usb_tx_agg_skb(struct rtw_usb *rtwusb, struct sk_buff_head *list
 	if (skb_queue_empty(list))
 		return false;
 
-	txcb = kmalloc(sizeof(*txcb), GFP_ATOMIC);
+	txcb = kmalloc_obj(*txcb, GFP_ATOMIC);
 	if (!txcb)
 		return false;
 
@@ -619,8 +619,8 @@ static void rtw_usb_rx_handler(struct work_struct *work)
 	u32 max_skb_len = pkt_desc_sz + PHY_STATUS_SIZE * 8 +
 			  IEEE80211_MAX_MPDU_LEN_VHT_11454;
 	u32 pkt_offset, next_pkt, skb_len;
+	int limit, ret;
 	u8 *rx_desc;
-	int limit;
 
 	for (limit = 0; limit < 200; limit++) {
 		rx_skb = skb_dequeue(&rtwusb->rx_queue);
@@ -636,8 +636,11 @@ static void rtw_usb_rx_handler(struct work_struct *work)
 		rx_desc = rx_skb->data;
 
 		do {
-			rtw_rx_query_rx_desc(rtwdev, rx_desc, &pkt_stat,
-					     &rx_status);
+			ret = rtw_rx_query_rx_desc(rtwdev, rx_desc,
+						   &pkt_stat, &rx_status);
+			if (ret)
+				break;
+
 			pkt_offset = pkt_desc_sz + pkt_stat.drv_info_sz +
 				     pkt_stat.shift;
 
@@ -974,7 +977,8 @@ static int rtw_usb_init_rx(struct rtw_dev *rtwdev)
 	struct sk_buff *rx_skb;
 	int i;
 
-	rtwusb->rxwq = alloc_workqueue("rtw88_usb: rx wq", WQ_BH, 0);
+	rtwusb->rxwq = alloc_workqueue("rtw88_usb: rx wq", WQ_BH | WQ_PERCPU,
+				       0);
 	if (!rtwusb->rxwq) {
 		rtw_err(rtwdev, "failed to create RX work queue\n");
 		return -ENOMEM;

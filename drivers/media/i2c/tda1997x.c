@@ -2274,9 +2274,9 @@ static int tda1997x_set_power(struct tda1997x_state *state, bool on)
 }
 
 static const struct i2c_device_id tda1997x_i2c_id[] = {
-	{"tda19971", (kernel_ulong_t)&tda1997x_chip_info[TDA19971]},
-	{"tda19973", (kernel_ulong_t)&tda1997x_chip_info[TDA19973]},
-	{ },
+	{ .name = "tda19971", .driver_data = (kernel_ulong_t)&tda1997x_chip_info[TDA19971] },
+	{ .name = "tda19973", .driver_data = (kernel_ulong_t)&tda1997x_chip_info[TDA19973] },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tda1997x_i2c_id);
 
@@ -2538,7 +2538,7 @@ static int tda1997x_probe(struct i2c_client *client)
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_SMBUS_BYTE_DATA))
 		return -EIO;
 
-	state = kzalloc(sizeof(struct tda1997x_state), GFP_KERNEL);
+	state = kzalloc_obj(struct tda1997x_state);
 	if (!state)
 		return -ENOMEM;
 

@@ -827,7 +827,7 @@ int cdc_ncm_bind_common(struct usbnet *dev, struct usb_interface *intf, u8 data_
 	u8 iface_no;
 	struct usb_cdc_parsed_header hdr;
 
-	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+	ctx = kzalloc_obj(*ctx);
 	if (!ctx)
 		return -ENOMEM;
 
@@ -2009,6 +2009,20 @@ static const struct usb_device_id cdc_devs[] = {
 		.driver_info = (unsigned long)&apple_tethering_interface_info,
 	},
 	{ USB_DEVICE_INTERFACE_NUMBER(0x05ac, 0x12ab, 4),
+		.driver_info = (unsigned long)&apple_private_interface_info,
+	},
+
+	/* Mac */
+	{ USB_DEVICE_INTERFACE_NUMBER(0x05ac, 0x1902, 0),
+		.driver_info = (unsigned long)&apple_private_interface_info,
+	},
+	{ USB_DEVICE_INTERFACE_NUMBER(0x05ac, 0x1902, 2),
+		.driver_info = (unsigned long)&apple_private_interface_info,
+	},
+	{ USB_DEVICE_INTERFACE_NUMBER(0x05ac, 0x1905, 0),
+		.driver_info = (unsigned long)&apple_private_interface_info,
+	},
+	{ USB_DEVICE_INTERFACE_NUMBER(0x05ac, 0x1905, 2),
 		.driver_info = (unsigned long)&apple_private_interface_info,
 	},
 

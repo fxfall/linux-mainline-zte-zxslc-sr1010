@@ -289,6 +289,89 @@ static void sof_ipc4_dump_payload(struct snd_sof_dev *sdev,
 			     16, 4, ipc_data, size, false);
 }
 
+static const char *sof_ipc4_resource_type_str(u32 type)
+{
+	switch (type) {
+	case SOF_IPC4_MODULE_INSTANCE:
+		return "resource: MODULE_INSTANCE";
+	case SOF_IPC4_PIPELINE:
+		return "resource: PIPELINE";
+	case SOF_IPC4_GATEWAY:
+		return "resource: GATEWAY";
+	case SOF_IPC4_EDF_TASK:
+		return "resource: EDF_TASK";
+	case SOF_IPC4_INVALID_RESOURCE_TYPE:
+		return "Resource is invalid";
+	default:
+		return "Unknown resource type";
+	}
+}
+
+static const char *sof_ipc4_resource_event_type_str(u32 event_type)
+{
+	switch (event_type) {
+	case SOF_IPC4_MIXER_UNDERRUN_DETECTED:
+		return "event:    MIXER_UNDERRUN_DETECTED";
+	case SOF_IPC4_PROCESS_DATA_ERROR:
+		return "event:    PROCESS_DATA_ERROR";
+	case SOF_IPC4_GATEWAY_UNDERRUN_DETECTED:
+		return "event:    GATEWAY_UNDERRUN_DETECTED";
+	case SOF_IPC4_GATEWAY_OVERRUN_DETECTED:
+		return "event:    GATEWAY_OVERRUN_DETECTED";
+	default:
+		return "Unknown event type";
+	}
+}
+
+static void sof_ipc4_resource_event_handler(struct snd_sof_dev *sdev,
+					    struct sof_ipc4_msg *ipc4_msg)
+{
+	struct sof_ipc4_notify_resource_data *data = ipc4_msg->data_ptr;
+
+	/* Print event details */
+	switch (data->event_type) {
+	case SOF_IPC4_MIXER_UNDERRUN_DETECTED:
+		dev_dbg(sdev->dev, "%s (%u): eos %u, mixed %u, expected %u\n",
+			sof_ipc4_resource_event_type_str(data->event_type),
+			data->event_type, data->data.mixer_underrun.eos_flag,
+			data->data.mixer_underrun.data_mixed,
+			data->data.mixer_underrun.expected_data_mixed);
+		break;
+	case SOF_IPC4_PROCESS_DATA_ERROR:
+		dev_dbg(sdev->dev, "%s (%u): error_code %#x\n",
+			sof_ipc4_resource_event_type_str(data->event_type),
+			data->event_type, data->data.process_data_error.error_code);
+		break;
+	case SOF_IPC4_GATEWAY_UNDERRUN_DETECTED:
+	case SOF_IPC4_GATEWAY_OVERRUN_DETECTED:
+		dev_dbg(sdev->dev, "%s (%u)\n",
+			sof_ipc4_resource_event_type_str(data->event_type),
+			data->event_type);
+		break;
+	default:
+		dev_dbg(sdev->dev, "%s (%u): raw dws %#x %#x %#x %#x %#x %#x\n",
+			sof_ipc4_resource_event_type_str(data->event_type),
+			data->event_type,
+			data->data.dws[0], data->data.dws[1], data->data.dws[2],
+			data->data.dws[3], data->data.dws[4], data->data.dws[5]);
+		break;
+	}
+
+	/* Print resource details */
+	if (data->resource_type == SOF_IPC4_MODULE_INSTANCE) {
+		u32 module_id = SOF_IPC4_MOD_ID_GET(data->resource_id);
+		u32 instance_id = SOF_IPC4_MOD_INSTANCE_GET(data->resource_id);
+
+		dev_dbg(sdev->dev, "%s (%u), module_id %u, instance_id %u\n",
+			sof_ipc4_resource_type_str(data->resource_type),
+			data->resource_type, module_id, instance_id);
+	} else if (data->resource_type != SOF_IPC4_INVALID_RESOURCE_TYPE) {
+		dev_dbg(sdev->dev, "%s (%u), id %u\n",
+			sof_ipc4_resource_type_str(data->resource_type),
+			data->resource_type, data->resource_id);
+	}
+}
+
 static int sof_ipc4_get_reply(struct snd_sof_dev *sdev)
 {
 	struct snd_sof_ipc_msg *msg = sdev->msg;
@@ -412,7 +495,7 @@ static int sof_ipc4_tx_msg(struct snd_sof_dev *sdev, void *msg_data, size_t msg_
 	}
 
 	/* Serialise IPC TX */
-	mutex_lock(&ipc->tx_mutex);
+	guard(mutex)(&ipc->tx_mutex);
 
 	ret = ipc4_tx_msg_unlocked(ipc, msg_data, msg_bytes, reply_data, reply_bytes);
 
@@ -429,8 +512,6 @@ static int sof_ipc4_tx_msg(struct snd_sof_dev *sdev, void *msg_data, size_t msg_
 			sof_ipc4_dump_payload(sdev, msg->data_ptr, msg->data_size);
 	}
 
-	mutex_unlock(&ipc->tx_mutex);
-
 	return ret;
 }
 
@@ -445,6 +526,7 @@ static bool sof_ipc4_tx_payload_for_get_data(struct sof_ipc4_msg *tx)
 	switch (tx->extension & SOF_IPC4_MOD_EXT_MSG_PARAM_ID_MASK) {
 	case SOF_IPC4_MOD_EXT_MSG_PARAM_ID(SOF_IPC4_SWITCH_CONTROL_PARAM_ID):
 	case SOF_IPC4_MOD_EXT_MSG_PARAM_ID(SOF_IPC4_ENUM_CONTROL_PARAM_ID):
+	case SOF_IPC4_MOD_EXT_MSG_PARAM_ID(SOF_IPC4_BYTES_CONTROL_PARAM_ID):
 		return true;
 	default:
 		return false;
@@ -505,7 +587,7 @@ static int sof_ipc4_set_get_data(struct snd_sof_dev *sdev, void *data,
 	}
 
 	/* Serialise IPC TX */
-	mutex_lock(&sdev->ipc->tx_mutex);
+	guard(mutex)(&sdev->ipc->tx_mutex);
 
 	do {
 		size_t tx_size, rx_size;
@@ -588,8 +670,6 @@ static int sof_ipc4_set_get_data(struct snd_sof_dev *sdev, void *data,
 out:
 	if (sof_debug_check_flag(SOF_DBG_DUMP_IPC_MESSAGE_PAYLOAD))
 		sof_ipc4_dump_payload(sdev, ipc4_msg->data_ptr, ipc4_msg->data_size);
-
-	mutex_unlock(&sdev->ipc->tx_mutex);
 
 	kfree(tx_payload_for_get);
 
@@ -737,6 +817,7 @@ static void sof_ipc4_rx_msg(struct snd_sof_dev *sdev)
 		break;
 	case SOF_IPC4_NOTIFY_RESOURCE_EVENT:
 		data_size = sizeof(struct sof_ipc4_notify_resource_data);
+		handler_func = sof_ipc4_resource_event_handler;
 		break;
 	case SOF_IPC4_NOTIFY_LOG_BUFFER_STATUS:
 		sof_ipc4_mtrace_update_pos(sdev, SOF_IPC4_LOG_CORE_GET(ipc4_msg->primary));
@@ -931,6 +1012,19 @@ void sof_ipc4_mic_privacy_state_change(struct snd_sof_dev *sdev, bool state)
 {
 	struct sof_ipc4_msg msg;
 	u32 data = state;
+
+	/*
+	 * The mic privacy change notification's role is to notify the running
+	 * firmware that there is a change in mic privacy state from whatever
+	 * the state was before - since the firmware booted up or since the
+	 * previous change during runtime.
+	 *
+	 * If the firmware has not been booted up, there is no need to send
+	 * change notification (the firmware is not booted up).
+	 * The firmware checks the current state during its boot.
+	 */
+	if (sdev->fw_state != SOF_FW_BOOT_COMPLETE)
+		return;
 
 	msg.primary = SOF_IPC4_MSG_TARGET(SOF_IPC4_MODULE_MSG);
 	msg.primary |= SOF_IPC4_MSG_DIR(SOF_IPC4_MSG_REQUEST);

@@ -82,12 +82,6 @@ static inline unsigned int reg_status(struct bcm7038_l1_chip *intc,
 	return (0 * intc->n_words + word) * sizeof(u32);
 }
 
-static inline unsigned int reg_mask_status(struct bcm7038_l1_chip *intc,
-					   unsigned int word)
-{
-	return (1 * intc->n_words + word) * sizeof(u32);
-}
-
 static inline unsigned int reg_mask_set(struct bcm7038_l1_chip *intc,
 					unsigned int word)
 {
@@ -248,8 +242,7 @@ static int bcm7038_l1_init_one(struct device_node *dn, unsigned int idx,
 		return -EINVAL;
 	}
 
-	cpu = intc->cpus[idx] = kzalloc(struct_size(cpu, mask_cache, n_words),
-					GFP_KERNEL);
+	cpu = intc->cpus[idx] = kzalloc_flex(*cpu, mask_cache, n_words);
 	if (!cpu)
 		return -ENOMEM;
 
@@ -291,7 +284,7 @@ static int bcm7038_l1_init_one(struct device_node *dn, unsigned int idx,
 static LIST_HEAD(bcm7038_l1_intcs_list);
 static DEFINE_RAW_SPINLOCK(bcm7038_l1_intcs_lock);
 
-static int bcm7038_l1_suspend(void)
+static int bcm7038_l1_suspend(void *data)
 {
 	struct bcm7038_l1_chip *intc;
 	int boot_cpu, word;
@@ -317,7 +310,7 @@ static int bcm7038_l1_suspend(void)
 	return 0;
 }
 
-static void bcm7038_l1_resume(void)
+static void bcm7038_l1_resume(void *data)
 {
 	struct bcm7038_l1_chip *intc;
 	int boot_cpu, word;
@@ -338,9 +331,13 @@ static void bcm7038_l1_resume(void)
 	}
 }
 
-static struct syscore_ops bcm7038_l1_syscore_ops = {
+static const struct syscore_ops bcm7038_l1_syscore_ops = {
 	.suspend	= bcm7038_l1_suspend,
 	.resume		= bcm7038_l1_resume,
+};
+
+static struct syscore bcm7038_l1_syscore = {
+	.ops = &bcm7038_l1_syscore_ops,
 };
 
 static int bcm7038_l1_set_wake(struct irq_data *d, unsigned int on)
@@ -400,7 +397,7 @@ static int bcm7038_l1_probe(struct platform_device *pdev, struct device_node *pa
 	struct bcm7038_l1_chip *intc;
 	int idx, ret;
 
-	intc = kzalloc(sizeof(*intc), GFP_KERNEL);
+	intc = kzalloc_obj(*intc);
 	if (!intc)
 		return -ENOMEM;
 
@@ -430,7 +427,7 @@ static int bcm7038_l1_probe(struct platform_device *pdev, struct device_node *pa
 	raw_spin_unlock(&bcm7038_l1_intcs_lock);
 
 	if (list_is_singular(&bcm7038_l1_intcs_list))
-		register_syscore_ops(&bcm7038_l1_syscore_ops);
+		register_syscore(&bcm7038_l1_syscore);
 #endif
 
 	pr_info("registered BCM7038 L1 intc (%pOF, IRQs: %d)\n",

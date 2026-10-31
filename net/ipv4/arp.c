@@ -79,6 +79,7 @@
 #include <linux/socket.h>
 #include <linux/sockios.h>
 #include <linux/errno.h>
+#include <linux/hex.h>
 #include <linux/in.h>
 #include <linux/mm.h>
 #include <linux/inet.h>
@@ -108,7 +109,6 @@
 #include <net/sock.h>
 #include <net/arp.h>
 #include <net/ax25.h>
-#include <net/netrom.h>
 #include <net/dst_metadata.h>
 #include <net/ip_tunnels.h>
 
@@ -1190,7 +1190,7 @@ static int arp_req_get(struct net *net, struct arpreq *r)
 
 	read_lock_bh(&neigh->lock);
 	memcpy(r->arp_ha.sa_data, neigh->ha,
-	       min(dev->addr_len, sizeof(r->arp_ha.sa_data_min)));
+	       min(dev->addr_len, sizeof(r->arp_ha.sa_data)));
 	r->arp_flags = arp_state_to_flags(neigh);
 	read_unlock_bh(&neigh->lock);
 
@@ -1218,10 +1218,10 @@ int arp_invalidate(struct net_device *dev, __be32 ip, bool force)
 			err = neigh_update(neigh, NULL, NUD_FAILED,
 					   NEIGH_UPDATE_F_OVERRIDE|
 					   NEIGH_UPDATE_F_ADMIN, 0);
-		write_lock_bh(&tbl->lock);
+		spin_lock_bh(&tbl->lock);
 		neigh_release(neigh);
 		neigh_remove_one(neigh);
-		write_unlock_bh(&tbl->lock);
+		spin_unlock_bh(&tbl->lock);
 	}
 
 	return err;
@@ -1278,6 +1278,7 @@ int arp_ioctl(struct net *net, unsigned int cmd, void __user *arg)
 		err = copy_from_user(&r, arg, sizeof(struct arpreq));
 		if (err)
 			return -EFAULT;
+		r.arp_dev[IFNAMSIZ - 1] = '\0';
 		break;
 	default:
 		return -EINVAL;

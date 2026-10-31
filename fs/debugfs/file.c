@@ -82,7 +82,7 @@ static int __debugfs_file_get(struct dentry *dentry, enum dbgfs_get_mode mode)
 		if (WARN_ON(mode == DBGFS_GET_ALREADY))
 			return -EINVAL;
 
-		fsd = kmalloc(sizeof(*fsd), GFP_KERNEL);
+		fsd = kmalloc_obj(*fsd);
 		if (!fsd)
 			return -ENOMEM;
 
@@ -273,7 +273,8 @@ static int debugfs_locked_down(struct inode *inode,
 	    (!real_fops ||
 	     (!real_fops->unlocked_ioctl &&
 	      !real_fops->compat_ioctl &&
-	      !real_fops->mmap)))
+	      !real_fops->mmap &&
+	      !real_fops->mmap_prepare)))
 		return 0;
 
 	if (security_locked_down(LOCKDOWN_DEBUGFS))

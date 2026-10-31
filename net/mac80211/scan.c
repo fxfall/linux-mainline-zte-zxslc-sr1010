@@ -76,7 +76,11 @@ void ieee80211_inform_bss(struct wiphy *wiphy,
 	if (!update_data)
 		return;
 
-	elems = ieee802_11_parse_elems(ies->data, ies->len, false, NULL);
+	elems = ieee802_11_parse_elems(ies->data, ies->len,
+				       update_data->beacon ?
+					IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_BEACON :
+					IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_PROBE_RESP,
+				       NULL);
 	if (!elems)
 		return;
 
@@ -212,7 +216,7 @@ ieee80211_bss_info_update(struct ieee80211_local *local,
 
 		if (link_conf) {
 			bss_meta.parent_tsf =
-				ieee80211_calculate_rx_timestamp(local,
+				ieee80211_calculate_rx_timestamp(&local->hw,
 								 rx_status,
 								 len + FCS_LEN,
 								 24);
@@ -1238,7 +1242,7 @@ int ieee80211_request_ibss_scan(struct ieee80211_sub_if_data *sdata,
 			}
 		}
 
-		if (WARN_ON_ONCE(n_ch == 0))
+		if (n_ch == 0)
 			return -EINVAL;
 
 		local->int_scan_req->n_channels = n_ch;

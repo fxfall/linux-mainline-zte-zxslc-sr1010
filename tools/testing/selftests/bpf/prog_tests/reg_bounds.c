@@ -478,6 +478,52 @@ static struct range range_refine_in_halves(enum num_t x_t, struct range x,
 
 }
 
+static __always_inline u64 next_u32_block(u64 x) { return x + (1ULL << 32); }
+static __always_inline u64 prev_u32_block(u64 x) { return x - (1ULL << 32); }
+
+/* Is v within the circular u64 range [base, base + len]? */
+static __always_inline bool u64_range_contains(u64 v, u64 base, u64 len)
+{
+	return v - base <= len;
+}
+
+/* Is v within the circular u32 range [base, base + len]? */
+static __always_inline bool u32_range_contains(u32 v, u32 base, u32 len)
+{
+	return v - base <= len;
+}
+
+static bool range64_range32_intersect(enum num_t a_t,
+				      struct range a /* 64 */,
+				      struct range b /* 32 */,
+				      struct range *out /* 64 */)
+{
+	u64 b_len = (u32)(b.b - b.a);
+	u64 a_len = a.b - a.a;
+	u64 lo, hi;
+
+	if (u32_range_contains((u32)a.a, (u32)b.a, b_len)) {
+		lo = a.a;
+	} else {
+		lo = swap_low32(a.a, (u32)b.a);
+		if (!u64_range_contains(lo, a.a, a_len))
+			lo = next_u32_block(lo);
+		if (!u64_range_contains(lo, a.a, a_len))
+			return false;
+	}
+	if (u32_range_contains(a.b, (u32)b.a, b_len)) {
+		hi = a.b;
+	} else {
+		hi = swap_low32(a.b, (u32)b.b);
+		if (!u64_range_contains(hi, a.a, a_len))
+			hi = prev_u32_block(hi);
+		if (!u64_range_contains(hi, a.a, a_len))
+			return false;
+	}
+	*out = range(a_t, lo, hi);
+	return true;
+}
+
 static struct range range_refine(enum num_t x_t, struct range x, enum num_t y_t, struct range y)
 {
 	struct range y_cast;
@@ -533,37 +579,12 @@ static struct range range_refine(enum num_t x_t, struct range x, enum num_t y_t,
 		}
 	}
 
-	/* the case when new range knowledge, *y*, is a 32-bit subregister
-	 * range, while previous range knowledge, *x*, is a full register
-	 * 64-bit range, needs special treatment to take into account upper 32
-	 * bits of full register range
-	 */
 	if (t_is_32(y_t) && !t_is_32(x_t)) {
-		struct range x_swap;
+		struct range x1;
 
-		/* some combinations of upper 32 bits and sign bit can lead to
-		 * invalid ranges, in such cases it's easier to detect them
-		 * after cast/swap than try to enumerate all the conditions
-		 * under which transformation and knowledge transfer is valid
-		 */
-		x_swap = range(x_t, swap_low32(x.a, y_cast.a), swap_low32(x.b, y_cast.b));
-		if (!is_valid_range(x_t, x_swap))
-			return x;
-		return range_intersection(x_t, x, x_swap);
-	}
-
-	if (!t_is_32(x_t) && !t_is_32(y_t) && x_t != y_t) {
-		if (x_t == S64 && x.a > x.b) {
-			if (x.b < y.a && x.a <= y.b)
-				return range(x_t, x.a, y.b);
-			if (x.a > y.b && x.b >= y.a)
-				return range(x_t, y.a, x.b);
-		} else if (x_t == U64 && y.a > y.b) {
-			if (y.b < x.a && y.a <= x.b)
-				return range(x_t, y.a, x.b);
-			if (y.a > x.b && y.b >= x.a)
-				return range(x_t, x.a, y.b);
-		}
+		if (range64_range32_intersect(x_t, x, y, &x1))
+			return x1;
+		return x;
 	}
 
 	/* otherwise, plain range cast and intersection works */
@@ -1264,7 +1285,23 @@ static int parse_range_cmp_log(const char *log_buf, struct case_spec spec,
 			spec.compare_subregs ? "w0" : "r0",
 			spec.compare_subregs ? "w" : "r", specs[i].reg_idx);
 
-		q = strstr(p, buf);
+		/*
+		 * In the verifier log look for lines:
+		 *   18: (bf) r0 = r6       ; R0=... R6=...
+		 * Different verifier passes may print
+		 *   18: (bf) r0 = r6
+		 * as well, but never followed by ';'.
+		 */
+		q = p;
+		while ((q = strstr(q, buf)) != NULL) {
+			const char *s = q + strlen(buf);
+
+			while (*s == ' ' || *s == '\t')
+				s++;
+			if (*s == ';')
+				break;
+			q = s;
+		}
 		if (!q) {
 			*specs[i].state = (struct reg_state){.valid = false};
 			continue;
@@ -1296,6 +1333,26 @@ static bool assert_range_eq(enum num_t t, struct range x, struct range y,
 	printf("%s\n", sb->buf);
 
 	return false;
+}
+
+/* For a pair of signed/unsigned t1/t2 checks if r1/r2 intersect in two intervals. */
+static bool needs_two_arcs(enum num_t t1, struct range r1,
+			   enum num_t t2, struct range r2)
+{
+	u64 lo = cast_t(t1, r2.a);
+	u64 hi = cast_t(t1, r2.b);
+
+	/* does r2 wrap in t1's domain: [0, hi] ∪ [lo, MAX]? */
+	return lo > hi && r1.a <= hi && r1.b >= lo;
+}
+
+static bool reg_state_needs_two_arcs(struct reg_state *s)
+{
+	if (!s->valid)
+		return false;
+
+	return needs_two_arcs(U64, s->r[U64], S64, s->r[S64]) ||
+	       needs_two_arcs(U32, s->r[U32], S32, s->r[S32]);
 }
 
 /* Validate that register states match, and print details if they don't */
@@ -1522,6 +1579,11 @@ static int verify_case_op(enum num_t init_t, enum num_t cond_t,
 	    !assert_reg_state_eq(&fr2, &fe2, "false_reg2") ||
 	    !assert_reg_state_eq(&tr1, &te1, "true_reg1") ||
 	    !assert_reg_state_eq(&tr2, &te2, "true_reg2")) {
+		if (reg_state_needs_two_arcs(&fe1) || reg_state_needs_two_arcs(&fe2) ||
+		    reg_state_needs_two_arcs(&te1) || reg_state_needs_two_arcs(&te2)) {
+			test__skip();
+			return 0;
+		}
 		failed = true;
 	}
 

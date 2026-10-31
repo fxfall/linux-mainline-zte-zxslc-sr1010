@@ -74,7 +74,8 @@ static int mlx5_fw_reset_enable_remote_dev_reset_set(struct devlink *devlink, u3
 }
 
 static int mlx5_fw_reset_enable_remote_dev_reset_get(struct devlink *devlink, u32 id,
-						     struct devlink_param_gset_ctx *ctx)
+						     struct devlink_param_gset_ctx *ctx,
+						     struct netlink_ext_ack *extack)
 {
 	struct mlx5_core_dev *dev = devlink_priv(devlink);
 	struct mlx5_fw_reset *fw_reset;
@@ -898,7 +899,7 @@ int mlx5_fw_reset_init(struct mlx5_core_dev *dev)
 	if (!MLX5_CAP_MCAM_REG(dev, mfrl))
 		return 0;
 
-	fw_reset = kzalloc(sizeof(*fw_reset), GFP_KERNEL);
+	fw_reset = kzalloc_obj(*fw_reset);
 	if (!fw_reset)
 		return -ENOMEM;
 	fw_reset->wq = create_singlethread_workqueue("mlx5_fw_reset_events");

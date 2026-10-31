@@ -3,11 +3,11 @@
 # MDIO Layer Configuration
 #
 
-if PHYLIB
+menu "MDIO controller drivers"
+	depends on PHYLIB
 
 config FWNODE_MDIO
 	def_tristate (ACPI || OF) || COMPILE_TEST
-	select FIXED_PHY
 	help
 	  FWNODE MDIO bus (Ethernet PHY) accessors
 
@@ -104,44 +104,6 @@ config MDIO_HISI_FEMAC
 	  This module provides a driver for the MDIO busses found in the
 	  Hisilicon SoC that have an Fast Ethernet MAC.
 
-config MDIO_ZX279133
-	bool "ZTE ZX279133 MDIO bus controller"
-	depends on (ARM64 || COMPILE_TEST) && OF_MDIO && COMMON_CLK
-	help
-	  This driver supports the independent Clause 22 and Clause 45 MDIO
-	  controllers in the ZTE ZX279133 SoC. Each controller uses separate
-	  peripheral and working clocks and provides bounded polling for both
-	  native transaction formats.
-
-config MDIO_SR1010_RTL8372N_AUDIT
-	bool "ZTE SR1010 RTL8372N read-only chip ID audit"
-	depends on MDIO_ZX279133
-	help
-	  Enable a test-only non-PHY MDIO child that performs exactly two fixed
-	  read-only chip ID transactions against the SR1010 RTL8372N switch.
-	  The audit fails closed unless attached to the expected MDIO controller
-	  and address, and a one-shot guard prevents any repeated bus access.
-	  This option is intended only for isolated RAM-boot hardware validation.
-
-config MDIO_SR1010_RTL8372N_PORT_AUDIT
-	bool "ZTE SR1010 RTL8372N read-only port status audit"
-	depends on MDIO_ZX279133
-	help
-	  Enable a test-only non-PHY MDIO child that reads the RTL8372N
-	  link, media, speed and duplex status registers for ports 3..8.
-	  This option performs no switch configuration and is intended only
-	  for isolated SR1010 LAN bring-up validation.
-
-config MDIO_SR1010_ZX279051_AUDIT
-	bool "ZTE SR1010 ZX279051 read-only identification audit"
-	depends on MDIO_ZX279133
-	help
-	  Enable a test-only MDIO child that performs exactly two fixed Clause 45
-	  identification reads from the SR1010 WAN PHY. This is intended only for
-	  isolated RAM-boot hardware validation and has no write operation. The
-	  audit fails closed unless it is attached to MDIO1 at its exact address,
-	  and a one-shot guard prevents the reads from being repeated after probe.
-
 config MDIO_I2C
 	tristate
 	depends on I2C
@@ -161,7 +123,8 @@ config MDIO_MVUSB
 
 config MDIO_MSCC_MIIM
 	tristate "Microsemi MIIM interface support"
-	depends on HAS_IOMEM && REGMAP_MMIO
+	depends on HAS_IOMEM
+	select REGMAP_MMIO
 	help
 	  This driver supports the MIIM (MDIO) interface found in the network
 	  switches of the Microsemi SoCs; it is recommended to switch on
@@ -183,6 +146,14 @@ config MDIO_OCTEON
 	  This module provides a driver for the Octeon and ThunderX MDIO
 	  buses. It is required by the Octeon and ThunderX ethernet device
 	  drivers on some systems.
+
+config MDIO_PIC64HPSC
+	tristate "PIC64-HPSC/HX MDIO interface support"
+	depends on ARCH_MICROCHIP || COMPILE_TEST
+	depends on HAS_IOMEM && OF_MDIO
+	help
+	  This driver supports the MDIO interface found on the PIC64-HPSC/HX
+	  SoCs.
 
 config MDIO_IPQ4019
 	tristate "Qualcomm IPQ4019 MDIO interface support"
@@ -228,7 +199,7 @@ config MDIO_THUNDER
 	  ThunderX SoCs when the MDIO bus device appears as a PCI
 	  device.
 
-comment "MDIO Multiplexers"
+menu "MDIO Multiplexers"
 
 config MDIO_BUS_MUX
 	tristate
@@ -285,7 +256,7 @@ config MDIO_BUS_MUX_BCM_IPROC
 
 config MDIO_BUS_MUX_GPIO
 	tristate "GPIO controlled MDIO bus multiplexers"
-	depends on OF_GPIO && OF_MDIO
+	depends on OF_MDIO
 	select MDIO_BUS_MUX
 	help
 	  This module provides a driver for MDIO bus multiplexers that
@@ -318,5 +289,5 @@ config MDIO_BUS_MUX_MMIOREG
 
 	  Currently, only 8/16/32 bits registers are supported.
 
-
-endif
+endmenu
+endmenu

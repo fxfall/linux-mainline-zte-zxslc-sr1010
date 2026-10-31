@@ -1017,7 +1017,7 @@ wbcir_probe(struct pnp_dev *device, const struct pnp_device_id *dev_id)
 		return -ENODEV;
 	}
 
-	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	data = kzalloc_obj(*data);
 	if (!data) {
 		err = -ENOMEM;
 		goto exit;
@@ -1179,8 +1179,8 @@ wbcir_remove(struct pnp_dev *device)
 }
 
 static const struct pnp_device_id wbcir_ids[] = {
-	{ "WEC1022", 0 },
-	{ "", 0 }
+	{ .id = "WEC1022" },
+	{ }
 };
 MODULE_DEVICE_TABLE(pnp, wbcir_ids);
 

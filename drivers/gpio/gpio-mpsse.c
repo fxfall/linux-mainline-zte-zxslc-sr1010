@@ -10,6 +10,7 @@
 #include <linux/cleanup.h>
 #include <linux/gpio/driver.h>
 #include <linux/mutex.h>
+#include <linux/rcupdate.h>
 #include <linux/spinlock.h>
 #include <linux/usb.h>
 
@@ -24,6 +25,7 @@ struct mpsse_priv {
 	raw_spinlock_t irq_spin;     /* protects worker list */
 	atomic_t irq_type[16];	     /* pin -> edge detection type */
 	atomic_t irq_enabled;
+	atomic_t dying;		     /* no new workers after disconnect */
 	int id;
 
 	u8 gpio_outputs[2];	     /* Output states for GPIOs [L, H] */
@@ -46,6 +48,7 @@ struct mpsse_worker {
 	atomic_t       cancelled;
 	struct list_head    list;   /* linked list */
 	struct list_head destroy;   /* teardown linked list */
+	struct rcu_head      rcu;   /* deferred free for dying path */
 };
 
 struct bulk_desc {
@@ -65,8 +68,19 @@ struct mpsse_quirk {
 	unsigned long dir_out;            /* Bitmask of valid output pins */
 };
 
+static struct mpsse_quirk bryx_brik_quirk = {
+	.names = {
+		[3] = "Push to Talk",
+		[5] = "Channel Activity",
+	},
+	.dir_out = BIT(3),	/* Push to Talk     */
+	.dir_in  = BIT(5),	/* Channel Activity */
+};
+
 static const struct usb_device_id gpio_mpsse_table[] = {
 	{ USB_DEVICE(0x0c52, 0xa064) },   /* SeaLevel Systems, Inc. */
+	{ USB_DEVICE(0x0403, 0x6988),     /* FTDI, assigned to Bryx */
+	  .driver_info = (kernel_ulong_t)&bryx_brik_quirk},
 	{ }                               /* Terminating entry */
 };
 
@@ -327,9 +341,8 @@ static int gpio_mpsse_direction_input(struct gpio_chip *chip,
 
 	guard(mutex)(&priv->io_mutex);
 	priv->gpio_dir[bank] &= ~BIT(bank_offset);
-	gpio_mpsse_set_bank(priv, bank);
 
-	return 0;
+	return gpio_mpsse_set_bank(priv, bank);
 }
 
 static int gpio_mpsse_get_direction(struct gpio_chip *chip,
@@ -508,17 +521,31 @@ static void gpio_mpsse_irq_enable(struct irq_data *irqd)
 		 * Can't be devm because it uses a non-raw spinlock (illegal in
 		 * this context, where a raw spinlock is held by our caller)
 		 */
-		worker = kzalloc(sizeof(*worker), GFP_NOWAIT);
+		worker = kzalloc_obj(*worker, GFP_NOWAIT);
 		if (!worker)
 			return;
 
 		worker->priv = priv;
 		INIT_LIST_HEAD(&worker->list);
 		INIT_WORK(&worker->work, gpio_mpsse_poll);
-		schedule_work(&worker->work);
 
-		scoped_guard(raw_spinlock_irqsave, &priv->irq_spin)
+		scoped_guard(raw_spinlock_irqsave, &priv->irq_spin) {
+			if (atomic_read(&priv->dying)) {
+				/*
+				 * Cannot kfree() here: this callback
+				 * runs with the IRQ descriptor's raw
+				 * spinlock held and kfree() may sleep
+				 * on PREEMPT_RT. The worker is not
+				 * yet published, so the deferred free
+				 * is unobservable.
+				 */
+				kfree_rcu(worker, rcu);
+				return;
+			}
+
 			list_add(&worker->list, &priv->workers);
+			schedule_work(&worker->work);
+		}
 	}
 }
 
@@ -536,13 +563,6 @@ static void gpio_mpsse_ida_remove(void *data)
 	struct mpsse_priv *priv = data;
 
 	ida_free(&gpio_mpsse_ida, priv->id);
-}
-
-static void gpio_mpsse_usb_put_dev(void *data)
-{
-	struct mpsse_priv *priv = data;
-
-	usb_put_dev(priv->udev);
 }
 
 static int mpsse_init_valid_mask(struct gpio_chip *chip,
@@ -588,11 +608,7 @@ static int gpio_mpsse_probe(struct usb_interface *interface,
 
 	INIT_LIST_HEAD(&priv->workers);
 
-	priv->udev = usb_get_dev(interface_to_usbdev(interface));
-	err = devm_add_action_or_reset(dev, gpio_mpsse_usb_put_dev, priv);
-	if (err)
-		return err;
-
+	priv->udev = interface_to_usbdev(interface);
 	priv->intf = interface;
 	priv->intf_id = interface->cur_altsetting->desc.bInterfaceNumber;
 
@@ -704,6 +720,9 @@ static int gpio_mpsse_probe(struct usb_interface *interface,
 static void gpio_mpsse_disconnect(struct usb_interface *intf)
 {
 	struct mpsse_priv *priv = usb_get_intfdata(intf);
+
+	scoped_guard(raw_spinlock_irqsave, &priv->irq_spin)
+		atomic_set(&priv->dying, 1);
 
 	/*
 	 * Lock prevents double-free of worker from here and the teardown

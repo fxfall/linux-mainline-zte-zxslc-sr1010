@@ -200,6 +200,8 @@ uvc_send_response(struct uvc_device *uvc, struct uvc_request_data *data)
 		return usb_ep_set_halt(cdev->gadget->ep0);
 
 	req->length = min_t(unsigned int, uvc->event_length, data->length);
+	if (req->length > sizeof(data->data))
+		req->length = sizeof(data->data);
 	req->zero = data->length < uvc->event_length;
 
 	memcpy(req->buf, data->data, req->length);
@@ -670,7 +672,7 @@ uvc_v4l2_open(struct file *file)
 	struct uvc_device *uvc = video_get_drvdata(vdev);
 	struct uvc_file_handle *handle;
 
-	handle = kzalloc(sizeof(*handle), GFP_KERNEL);
+	handle = kzalloc_obj(*handle);
 	if (handle == NULL)
 		return -ENOMEM;
 

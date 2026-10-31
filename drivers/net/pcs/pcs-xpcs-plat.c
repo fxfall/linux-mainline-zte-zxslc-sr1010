@@ -48,33 +48,6 @@ static ptrdiff_t xpcs_mmio_addr_offset(ptrdiff_t csr)
 	return FIELD_GET(0xff, csr);
 }
 
-/* PCS control 1 is a side-effect-free register suitable for write flushing. */
-static void xpcs_mmio_flush(struct dw_xpcs_plat *pxpcs)
-{
-	ptrdiff_t csr, ofs;
-	u16 page;
-
-	csr = xpcs_mmio_addr_format(MDIO_MMD_PCS, MDIO_CTRL1);
-
-	if (!pxpcs->reg_indir) {
-		if (pxpcs->reg_width == 4)
-			readl(pxpcs->reg_base + (csr << 2));
-		else
-			readw(pxpcs->reg_base + (csr << 1));
-		return;
-	}
-
-	page = xpcs_mmio_addr_page(csr);
-	ofs = xpcs_mmio_addr_offset(csr);
-	if (pxpcs->reg_width == 4) {
-		writel(page, pxpcs->reg_base + (DW_VR_CSR_VIEWPORT << 2));
-		readl(pxpcs->reg_base + (ofs << 2));
-	} else {
-		writew(page, pxpcs->reg_base + (DW_VR_CSR_VIEWPORT << 1));
-		readw(pxpcs->reg_base + (ofs << 1));
-	}
-}
-
 static int xpcs_mmio_read_reg_indirect(struct dw_xpcs_plat *pxpcs,
 				       int dev, int reg)
 {
@@ -87,7 +60,7 @@ static int xpcs_mmio_read_reg_indirect(struct dw_xpcs_plat *pxpcs,
 	ofs = xpcs_mmio_addr_offset(csr);
 
 	ret = pm_runtime_resume_and_get(&pxpcs->pdev->dev);
-	if (ret < 0)
+	if (ret)
 		return ret;
 
 	switch (pxpcs->reg_width) {
@@ -118,7 +91,7 @@ static int xpcs_mmio_write_reg_indirect(struct dw_xpcs_plat *pxpcs,
 	ofs = xpcs_mmio_addr_offset(csr);
 
 	ret = pm_runtime_resume_and_get(&pxpcs->pdev->dev);
-	if (ret < 0)
+	if (ret)
 		return ret;
 
 	switch (pxpcs->reg_width) {
@@ -132,8 +105,6 @@ static int xpcs_mmio_write_reg_indirect(struct dw_xpcs_plat *pxpcs,
 		break;
 	}
 
-	/* Complete posted writes before runtime-PM can gate the CSR clock. */
-	xpcs_mmio_flush(pxpcs);
 	pm_runtime_put(&pxpcs->pdev->dev);
 
 	return 0;
@@ -148,7 +119,7 @@ static int xpcs_mmio_read_reg_direct(struct dw_xpcs_plat *pxpcs,
 	csr = xpcs_mmio_addr_format(dev, reg);
 
 	ret = pm_runtime_resume_and_get(&pxpcs->pdev->dev);
-	if (ret < 0)
+	if (ret)
 		return ret;
 
 	switch (pxpcs->reg_width) {
@@ -174,7 +145,7 @@ static int xpcs_mmio_write_reg_direct(struct dw_xpcs_plat *pxpcs,
 	csr = xpcs_mmio_addr_format(dev, reg);
 
 	ret = pm_runtime_resume_and_get(&pxpcs->pdev->dev);
-	if (ret < 0)
+	if (ret)
 		return ret;
 
 	switch (pxpcs->reg_width) {
@@ -186,8 +157,6 @@ static int xpcs_mmio_write_reg_direct(struct dw_xpcs_plat *pxpcs,
 		break;
 	}
 
-	/* Complete posted writes before runtime-PM can gate the CSR clock. */
-	xpcs_mmio_flush(pxpcs);
 	pm_runtime_put(&pxpcs->pdev->dev);
 
 	return 0;
@@ -316,30 +285,12 @@ static int xpcs_plat_init_clk(struct dw_xpcs_plat *pxpcs)
 		return dev_err_probe(dev, PTR_ERR(pxpcs->cclk),
 				     "Failed to get CSR clock\n");
 
-	if (pxpcs->cclk)
-		ret = pm_runtime_set_suspended(dev);
-	else
-		ret = pm_runtime_set_active(dev);
-	if (ret)
-		return dev_err_probe(dev, ret,
-				     "Failed to initialize runtime-PM state\n");
-
+	pm_runtime_set_active(dev);
 	ret = devm_pm_runtime_enable(dev);
 	if (ret) {
 		dev_err(dev, "Failed to enable runtime-PM\n");
 		return ret;
 	}
-
-	if (!pxpcs->cclk)
-		return 0;
-
-	/* The CSR clock must be enabled through the runtime-PM resume path. */
-	ret = pm_runtime_resume_and_get(dev);
-	if (ret < 0) {
-		dev_err(dev, "Failed to resume CSR clock: %d\n", ret);
-		return ret;
-	}
-	pm_runtime_put(dev);
 
 	return 0;
 }
@@ -398,7 +349,7 @@ static int xpcs_plat_init_dev(struct dw_xpcs_plat *pxpcs)
 	 * up later. Make sure DD-core is aware of the OF-node being re-used.
 	 */
 	device_set_node(&mdiodev->dev, fwnode_handle_get(dev_fwnode(dev)));
-	mdiodev->dev.of_node_reused = true;
+	dev_set_of_node_reused(&mdiodev->dev);
 
 	/* Pass the data further so the DW XPCS driver core could use it */
 	mdiodev->dev.platform_data = (void *)device_get_match_data(dev);
@@ -413,9 +364,6 @@ static int xpcs_plat_init_dev(struct dw_xpcs_plat *pxpcs)
 
 err_clean_data:
 	mdiodev->dev.platform_data = NULL;
-
-	fwnode_handle_put(dev_fwnode(&mdiodev->dev));
-	device_set_node(&mdiodev->dev, NULL);
 
 	mdio_device_free(mdiodev);
 
@@ -454,8 +402,7 @@ static int __maybe_unused xpcs_plat_pm_runtime_suspend(struct device *dev)
 {
 	struct dw_xpcs_plat *pxpcs = dev_get_drvdata(dev);
 
-	if (pxpcs->cclk)
-		clk_disable_unprepare(pxpcs->cclk);
+	clk_disable_unprepare(pxpcs->cclk);
 
 	return 0;
 }
@@ -463,9 +410,6 @@ static int __maybe_unused xpcs_plat_pm_runtime_suspend(struct device *dev)
 static int __maybe_unused xpcs_plat_pm_runtime_resume(struct device *dev)
 {
 	struct dw_xpcs_plat *pxpcs = dev_get_drvdata(dev);
-
-	if (!pxpcs->cclk)
-		return 0;
 
 	return clk_prepare_enable(pxpcs->cclk);
 }
@@ -509,5 +453,5 @@ static struct platform_driver xpcs_plat_driver = {
 module_platform_driver(xpcs_plat_driver);
 
 MODULE_DESCRIPTION("Synopsys DesignWare XPCS platform device driver");
-MODULE_AUTHOR("Signed-off-by: Serge Semin <fancer.lancer@gmail.com>");
+MODULE_AUTHOR("Serge Semin <fancer.lancer@gmail.com>");
 MODULE_LICENSE("GPL");

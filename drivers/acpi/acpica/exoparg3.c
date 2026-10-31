@@ -3,7 +3,7 @@
  *
  * Module Name: exoparg3 - AML execution - opcodes with 3 arguments
  *
- * Copyright (C) 2000 - 2025, Intel Corp.
+ * Copyright (C) 2000 - 2026, Intel Corp.
  *
  *****************************************************************************/
 
@@ -72,11 +72,18 @@ acpi_status acpi_ex_opcode_3A_0T_0R(struct acpi_walk_state *walk_state)
 
 		acpi_os_signal(ACPI_SIGNAL_FATAL, &fatal);
 
+#ifndef ACPI_CONTINUE_ON_FATAL
 		/*
 		 * Might return while OS is shutting down, so abort the AML execution
 		 * by returning an error.
 		 */
 		return_ACPI_STATUS(AE_ERROR);
+#else
+		/*
+		 * The alstests require that the Fatal() opcode does not return an error.
+		 */
+		return_ACPI_STATUS(AE_OK);
+#endif
 
 	case AML_EXTERNAL_OP:
 		/*
@@ -152,7 +159,7 @@ acpi_status acpi_ex_opcode_3A_1T_1R(struct acpi_walk_state *walk_state)
 
 		/* Truncate request if larger than the actual String/Buffer */
 
-		else if ((index + length) > operand[0]->string.length) {
+		else if ((index + length) > operand[0]->string.length || (index + length) < index) {	/* Check for overflow */
 			length =
 			    (acpi_size)operand[0]->string.length -
 			    (acpi_size)index;

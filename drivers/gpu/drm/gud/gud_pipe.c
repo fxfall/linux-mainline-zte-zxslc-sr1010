@@ -61,7 +61,7 @@ static size_t gud_xrgb8888_to_r124(u8 *dst, const struct drm_format_info *format
 	size_t len;
 	void *buf;
 
-	WARN_ON_ONCE(format->char_per_block[0] != 1);
+	drm_WARN_ON_ONCE(fb->dev, format->char_per_block[0] != 1);
 
 	/* Start on a byte boundary */
 	rect->x1 = ALIGN_DOWN(rect->x1, block_width);
@@ -69,7 +69,7 @@ static size_t gud_xrgb8888_to_r124(u8 *dst, const struct drm_format_info *format
 	height = drm_rect_height(rect);
 	len = drm_format_info_min_pitch(format, 0, width) * height;
 
-	buf = kmalloc(width * height, GFP_KERNEL);
+	buf = kmalloc_array(height, width, GFP_KERNEL);
 	if (!buf)
 		return 0;
 
@@ -138,7 +138,7 @@ static size_t gud_xrgb8888_to_color(u8 *dst, const struct drm_format_info *forma
 				pix = ((r >> 7) << 2) | ((g >> 7) << 1) | (b >> 7);
 				break;
 			default:
-				WARN_ON_ONCE(1);
+				drm_WARN_ON_ONCE(fb->dev, 1);
 				return len;
 			}
 
@@ -447,11 +447,11 @@ static void gud_fb_handle_damage(struct gud_device *gdrm, struct drm_framebuffer
 	}
 
 	/* Imported buffers are assumed to be WriteCombined with uncached reads */
-	gud_flush_damage(gdrm, fb, src, !fb->obj[0]->import_attach, damage);
+	gud_flush_damage(gdrm, fb, src, !drm_gem_is_imported(fb->obj[0]), damage);
 }
 
 int gud_plane_atomic_check(struct drm_plane *plane,
-			   struct drm_atomic_state *state)
+			   struct drm_atomic_commit *state)
 {
 	struct gud_device *gdrm = to_gud_device(plane->dev);
 	struct drm_plane_state *old_plane_state = drm_atomic_get_old_plane_state(state, plane);
@@ -482,6 +482,9 @@ int gud_plane_atomic_check(struct drm_plane *plane,
 	if (!new_plane_state->visible)
 		return 0;
 
+	if (gdrm->flags & GUD_DISPLAY_FLAG_FULL_UPDATE)
+		new_plane_state->ignore_damage_clips = true;
+
 	if (old_plane_state->rotation != new_plane_state->rotation)
 		crtc_state->mode_changed = true;
 
@@ -504,6 +507,7 @@ int gud_plane_atomic_check(struct drm_plane *plane,
 	for_each_new_connector_in_state(state, connector, connector_state, i) {
 		if (connector_state->crtc)
 			break;
+		connector_state = NULL;
 	}
 
 	/*
@@ -523,7 +527,7 @@ int gud_plane_atomic_check(struct drm_plane *plane,
 		drm_connector_list_iter_end(&conn_iter);
 	}
 
-	if (WARN_ON_ONCE(!connector_state))
+	if (drm_WARN_ON_ONCE(plane->dev, !connector_state))
 		return -ENOENT;
 
 	len = struct_size(req, properties,
@@ -535,7 +539,7 @@ int gud_plane_atomic_check(struct drm_plane *plane,
 	gud_from_display_mode(&req->mode, mode);
 
 	req->format = gud_from_fourcc(format->format);
-	if (WARN_ON_ONCE(!req->format)) {
+	if (drm_WARN_ON_ONCE(plane->dev, !req->format)) {
 		ret = -EINVAL;
 		goto out;
 	}
@@ -557,13 +561,13 @@ int gud_plane_atomic_check(struct drm_plane *plane,
 			val = new_plane_state->rotation;
 			break;
 		default:
-			WARN_ON_ONCE(1);
+			drm_WARN_ON_ONCE(plane->dev, 1);
 			ret = -EINVAL;
 			goto out;
 		}
 
-		req->properties[num_properties + i].prop = cpu_to_le16(prop);
-		req->properties[num_properties + i].val = cpu_to_le64(val);
+		req->properties[num_properties].prop = cpu_to_le16(prop);
+		req->properties[num_properties].val = cpu_to_le64(val);
 		num_properties++;
 	}
 
@@ -581,7 +585,7 @@ out:
 }
 
 void gud_crtc_atomic_enable(struct drm_crtc *crtc,
-			    struct drm_atomic_state *state)
+			    struct drm_atomic_commit *state)
 {
 	struct drm_device *drm = crtc->dev;
 	struct gud_device *gdrm = to_gud_device(drm);
@@ -598,7 +602,7 @@ void gud_crtc_atomic_enable(struct drm_crtc *crtc,
 }
 
 void gud_crtc_atomic_disable(struct drm_crtc *crtc,
-			     struct drm_atomic_state *state)
+			     struct drm_atomic_commit *state)
 {
 	struct drm_device *drm = crtc->dev;
 	struct gud_device *gdrm = to_gud_device(drm);
@@ -614,7 +618,7 @@ void gud_crtc_atomic_disable(struct drm_crtc *crtc,
 }
 
 void gud_plane_atomic_update(struct drm_plane *plane,
-			     struct drm_atomic_state *atomic_state)
+			     struct drm_atomic_commit *atomic_state)
 {
 	struct drm_device *drm = plane->dev;
 	struct gud_device *gdrm = to_gud_device(drm);

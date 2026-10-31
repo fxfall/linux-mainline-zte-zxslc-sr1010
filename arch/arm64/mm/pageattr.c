@@ -21,7 +21,7 @@ struct page_change_data {
 	pgprot_t clear_mask;
 };
 
-static ptdesc_t set_pageattr_masks(ptdesc_t val, struct mm_walk *walk)
+static ptval_t set_pageattr_masks(ptval_t val, struct mm_walk *walk)
 {
 	struct page_change_data *masks = walk->private;
 
@@ -115,7 +115,7 @@ static int update_range_prot(unsigned long start, unsigned long size,
 	if (WARN_ON_ONCE(ret))
 		return ret;
 
-	arch_enter_lazy_mmu_mode();
+	lazy_mmu_mode_enable();
 
 	/*
 	 * The caller must ensure that the range we are operating on does not
@@ -124,7 +124,7 @@ static int update_range_prot(unsigned long start, unsigned long size,
 	 */
 	ret = walk_kernel_page_table_range_lockless(start, start + size,
 						    &pageattr_ops, NULL, &data);
-	arch_leave_lazy_mmu_mode();
+	lazy_mmu_mode_disable();
 
 	return ret;
 }
@@ -155,7 +155,6 @@ static int change_memory_common(unsigned long addr, int numpages,
 	unsigned long end = start + size;
 	struct vm_struct *area;
 	int ret;
-	int i;
 
 	if (!PAGE_ALIGNED(addr)) {
 		start &= PAGE_MASK;
@@ -178,7 +177,8 @@ static int change_memory_common(unsigned long addr, int numpages,
 	 */
 	area = find_vm_area((void *)addr);
 	if (!area ||
-	    end > (unsigned long)kasan_reset_tag(area->addr) + area->size ||
+	    ((unsigned long)kasan_reset_tag((void *)end) >
+	     (unsigned long)kasan_reset_tag(area->addr) + area->size) ||
 	    ((area->flags & (VM_ALLOC | VM_ALLOW_HUGE_VMAP)) != VM_ALLOC))
 		return -EINVAL;
 
@@ -191,9 +191,12 @@ static int change_memory_common(unsigned long addr, int numpages,
 	 */
 	if (rodata_full && (pgprot_val(set_mask) == PTE_RDONLY ||
 			    pgprot_val(clear_mask) == PTE_RDONLY)) {
-		for (i = 0; i < area->nr_pages; i++) {
-			ret = __change_memory_common((u64)page_address(area->pages[i]),
-					       PAGE_SIZE, set_mask, clear_mask);
+		unsigned long idx = ((unsigned long)kasan_reset_tag((void *)start) -
+				     (unsigned long)kasan_reset_tag(area->addr))
+				    >> PAGE_SHIFT;
+		for (; numpages; idx++, numpages--) {
+			ret = __change_memory_common((u64)page_address(area->pages[idx]),
+						     PAGE_SIZE, set_mask, clear_mask);
 			if (ret)
 				return ret;
 		}

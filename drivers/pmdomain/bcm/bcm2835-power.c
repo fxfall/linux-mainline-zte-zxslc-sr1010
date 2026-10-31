@@ -80,6 +80,7 @@
 #define PM_IMAGE			0x108
 #define PM_GRAFX			0x10c
 #define PM_PROC				0x110
+#define PM_GRAFX_2712			0x304
 #define PM_ENAB				BIT(12)
 #define PM_ISPRSTN			BIT(8)
 #define PM_H264RSTN			BIT(7)
@@ -174,7 +175,7 @@ static int bcm2835_asb_control(struct bcm2835_power *power, u32 reg, bool enable
 	writel(PM_PASSWORD | val, base + reg);
 
 	if (readl_poll_timeout_atomic(base + reg, val,
-				      !!(val & ASB_ACK) != enable, 0, 5))
+				      !!(val & ASB_ACK) != enable, 0, 100))
 		return -ETIMEDOUT;
 
 	return 0;
@@ -214,10 +215,10 @@ static int bcm2835_power_power_on(struct bcm2835_power_domain *pd, u32 pm_reg)
 {
 	struct bcm2835_power *power = pd->power;
 	struct device *dev = power->dev;
-	u64 start;
 	int ret;
 	int inrush;
 	bool powok;
+	u32 val;
 
 	/* We don't run this on BCM2711 */
 	if (power->rpivid_asb)
@@ -238,12 +239,8 @@ static int bcm2835_power_power_on(struct bcm2835_power_domain *pd, u32 pm_reg)
 			 (inrush << PM_INRUSH_SHIFT) |
 			 PM_POWUP);
 
-		start = ktime_get_ns();
-		while (!(powok = !!(PM_READ(pm_reg) & PM_POWOK))) {
-			cpu_relax();
-			if (ktime_get_ns() - start >= 3000)
-				break;
-		}
+		powok = !readl_poll_timeout_atomic(power->base + pm_reg,
+						   val, val & PM_POWOK, 0, 3);
 	}
 	if (!powok) {
 		dev_err(dev, "Timeout waiting for %s power OK\n",
@@ -257,15 +254,12 @@ static int bcm2835_power_power_on(struct bcm2835_power_domain *pd, u32 pm_reg)
 
 	/* Repair memory */
 	PM_WRITE(pm_reg, PM_READ(pm_reg) | PM_MEMREP);
-	start = ktime_get_ns();
-	while (!(PM_READ(pm_reg) & PM_MRDONE)) {
-		cpu_relax();
-		if (ktime_get_ns() - start >= 1000) {
-			dev_err(dev, "Timeout waiting for %s memory repair\n",
-				pd->base.name);
-			ret = -ETIMEDOUT;
-			goto err_disable_ispow;
-		}
+	if (readl_poll_timeout_atomic(power->base + pm_reg, val,
+				      val & PM_MRDONE, 0, 1)) {
+		dev_err(dev, "Timeout waiting for %s memory repair\n",
+			pd->base.name);
+		ret = -ETIMEDOUT;
+		goto err_disable_ispow;
 	}
 
 	/* Disable functional isolation */
@@ -377,6 +371,9 @@ static int bcm2835_power_pd_power_on(struct generic_pm_domain *domain)
 		return bcm2835_power_power_on(pd, PM_GRAFX);
 
 	case BCM2835_POWER_DOMAIN_GRAFX_V3D:
+		if (!power->asb)
+			return bcm2835_asb_power_on(pd, PM_GRAFX_2712,
+						    0, 0, PM_V3DRSTN);
 		return bcm2835_asb_power_on(pd, PM_GRAFX,
 					    ASB_V3D_M_CTRL, ASB_V3D_S_CTRL,
 					    PM_V3DRSTN);
@@ -443,6 +440,9 @@ static int bcm2835_power_pd_power_off(struct generic_pm_domain *domain)
 		return bcm2835_power_power_off(pd, PM_GRAFX);
 
 	case BCM2835_POWER_DOMAIN_GRAFX_V3D:
+		if (!power->asb)
+			return bcm2835_asb_power_off(pd, PM_GRAFX_2712,
+						     0, 0, PM_V3DRSTN);
 		return bcm2835_asb_power_off(pd, PM_GRAFX,
 					     ASB_V3D_M_CTRL, ASB_V3D_S_CTRL,
 					     PM_V3DRSTN);
@@ -631,10 +631,12 @@ static int bcm2835_power_probe(struct platform_device *pdev)
 	power->asb = pm->asb;
 	power->rpivid_asb = pm->rpivid_asb;
 
-	id = readl(power->asb + ASB_AXI_BRDG_ID);
-	if (id != BCM2835_BRDG_ID /* "BRDG" */) {
-		dev_err(dev, "ASB register ID returned 0x%08x\n", id);
-		return -ENODEV;
+	if (power->asb) {
+		id = readl(power->asb + ASB_AXI_BRDG_ID);
+		if (id != BCM2835_BRDG_ID /* "BRDG" */) {
+			dev_err(dev, "ASB register ID returned 0x%08x\n", id);
+			return -ENODEV;
+		}
 	}
 
 	if (power->rpivid_asb) {
@@ -675,7 +677,12 @@ static int bcm2835_power_probe(struct platform_device *pdev)
 	if (ret)
 		goto fail;
 
-	of_genpd_add_provider_onecell(dev->parent->of_node, &power->pd_xlate);
+	ret = of_genpd_add_provider_onecell(dev->parent->of_node,
+					    &power->pd_xlate);
+	if (ret) {
+		dev_err_probe(dev, ret, "failed to add genpd provider\n");
+		goto fail;
+	}
 
 	dev_info(dev, "Broadcom BCM2835 power domains driver");
 	return 0;

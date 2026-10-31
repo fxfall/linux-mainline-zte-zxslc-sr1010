@@ -559,7 +559,7 @@ uvc_video_alloc_requests(struct uvc_video *video)
 	uvc_video_prep_requests(video);
 
 	for (i = 0; i < video->uvc_num_requests; i++) {
-		ureq = kzalloc(sizeof(struct uvc_request), GFP_KERNEL);
+		ureq = kzalloc_obj(struct uvc_request);
 		if (ureq == NULL)
 			goto error;
 
@@ -821,7 +821,7 @@ int uvcg_video_init(struct uvc_video *video, struct uvc_device *uvc)
 	/* Allocate a kthread for asynchronous hw submit handler. */
 	video->kworker = kthread_run_worker(0, "UVCG");
 	if (IS_ERR(video->kworker)) {
-		uvcg_err(&video->uvc->func, "failed to create UVCG kworker\n");
+		uvcg_err(&uvc->func, "failed to create UVCG kworker\n");
 		return PTR_ERR(video->kworker);
 	}
 
@@ -838,7 +838,6 @@ int uvcg_video_init(struct uvc_video *video, struct uvc_device *uvc)
 	video->interval = 666666;
 
 	/* Initialize the video buffers queue. */
-	uvcg_queue_init(&video->queue, uvc->v4l2_dev.dev->parent,
+	return uvcg_queue_init(&video->queue, uvc->v4l2_dev.dev->parent,
 			V4L2_BUF_TYPE_VIDEO_OUTPUT, &video->mutex);
-	return 0;
 }

@@ -348,14 +348,6 @@ void unwind_start(struct unwind_state *state, struct task_struct *task,
 }
 EXPORT_SYMBOL_GPL(unwind_start);
 
-static bool is_entry_func(unsigned long addr)
-{
-	extern u32 kernel_entry;
-	extern u32 kernel_entry_end;
-
-	return addr >= (unsigned long)&kernel_entry && addr < (unsigned long)&kernel_entry_end;
-}
-
 static inline unsigned long bt_address(unsigned long ra)
 {
 #if defined(CONFIG_NUMA) && !defined(CONFIG_PREEMPT_RT)
@@ -412,9 +404,6 @@ bool unwind_next_frame(struct unwind_state *state)
 
 	/* Don't let modules unload while we're reading their ORC data. */
 	guard(rcu)();
-
-	if (is_entry_func(state->pc))
-		goto end;
 
 	orc = orc_find(state->pc);
 	if (!orc) {

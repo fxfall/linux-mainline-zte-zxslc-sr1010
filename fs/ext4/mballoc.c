@@ -98,14 +98,14 @@
  * block bitmap and buddy information. The information are stored in the
  * inode as:
  *
- *  {                        page                        }
+ *  {                        folio                        }
  *  [ group 0 bitmap][ group 0 buddy] [group 1][ group 1]...
  *
  *
  * one block each for bitmap and buddy information.  So for each group we
- * take up 2 blocks. A page can contain blocks_per_page (PAGE_SIZE /
- * blocksize) blocks.  So it can have information regarding groups_per_page
- * which is blocks_per_page/2
+ * take up 2 blocks. A folio can contain blocks_per_folio (folio_size /
+ * blocksize) blocks.  So it can have information regarding groups_per_folio
+ * which is blocks_per_folio/2
  *
  * The buddy cache inode is not stored on disk. The inode is thrown
  * away when the filesystem is unmounted.
@@ -1357,26 +1357,25 @@ static void mb_regenerate_buddy(struct ext4_buddy *e4b)
  * block bitmap and buddy information. The information are
  * stored in the inode as
  *
- * {                        page                        }
+ * {                        folio                        }
  * [ group 0 bitmap][ group 0 buddy] [group 1][ group 1]...
  *
  *
  * one block each for bitmap and buddy information.
- * So for each group we take up 2 blocks. A page can
- * contain blocks_per_page (PAGE_SIZE / blocksize)  blocks.
- * So it can have information regarding groups_per_page which
- * is blocks_per_page/2
+ * So for each group we take up 2 blocks. A folio can
+ * contain blocks_per_folio (folio_size / blocksize)  blocks.
+ * So it can have information regarding groups_per_folio which
+ * is blocks_per_folio/2
  *
  * Locking note:  This routine takes the block group lock of all groups
- * for this page; do not hold this lock when calling this routine!
+ * for this folio; do not hold this lock when calling this routine!
  */
-
 static int ext4_mb_init_cache(struct folio *folio, char *incore, gfp_t gfp)
 {
 	ext4_group_t ngroups;
 	unsigned int blocksize;
-	int blocks_per_page;
-	int groups_per_page;
+	int blocks_per_folio;
+	int groups_per_folio;
 	int err = 0;
 	int i;
 	ext4_group_t first_group, group;
@@ -1393,27 +1392,24 @@ static int ext4_mb_init_cache(struct folio *folio, char *incore, gfp_t gfp)
 	sb = inode->i_sb;
 	ngroups = ext4_get_groups_count(sb);
 	blocksize = i_blocksize(inode);
-	blocks_per_page = PAGE_SIZE / blocksize;
+	blocks_per_folio = folio_size(folio) / blocksize;
+	WARN_ON_ONCE(!blocks_per_folio);
+	groups_per_folio = DIV_ROUND_UP(blocks_per_folio, 2);
 
 	mb_debug(sb, "init folio %lu\n", folio->index);
 
-	groups_per_page = blocks_per_page >> 1;
-	if (groups_per_page == 0)
-		groups_per_page = 1;
-
 	/* allocate buffer_heads to read bitmaps */
-	if (groups_per_page > 1) {
-		i = sizeof(struct buffer_head *) * groups_per_page;
+	if (groups_per_folio > 1) {
+		i = sizeof(struct buffer_head *) * groups_per_folio;
 		bh = kzalloc(i, gfp);
 		if (bh == NULL)
 			return -ENOMEM;
 	} else
 		bh = &bhs;
 
-	first_group = folio->index * blocks_per_page / 2;
-
 	/* read all groups the folio covers into the cache */
-	for (i = 0, group = first_group; i < groups_per_page; i++, group++) {
+	first_group = EXT4_PG_TO_LBLK(inode, folio->index) / 2;
+	for (i = 0, group = first_group; i < groups_per_folio; i++, group++) {
 		if (group >= ngroups)
 			break;
 
@@ -1421,7 +1417,7 @@ static int ext4_mb_init_cache(struct folio *folio, char *incore, gfp_t gfp)
 		if (!grinfo)
 			continue;
 		/*
-		 * If page is uptodate then we came here after online resize
+		 * If folio is uptodate then we came here after online resize
 		 * which added some new uninitialized group info structs, so
 		 * we must skip all initialized uptodate buddies on the folio,
 		 * which may be currently in use by an allocating task.
@@ -1441,7 +1437,7 @@ static int ext4_mb_init_cache(struct folio *folio, char *incore, gfp_t gfp)
 	}
 
 	/* wait for I/O completion */
-	for (i = 0, group = first_group; i < groups_per_page; i++, group++) {
+	for (i = 0, group = first_group; i < groups_per_folio; i++, group++) {
 		int err2;
 
 		if (!bh[i])
@@ -1451,8 +1447,8 @@ static int ext4_mb_init_cache(struct folio *folio, char *incore, gfp_t gfp)
 			err = err2;
 	}
 
-	first_block = folio->index * blocks_per_page;
-	for (i = 0; i < blocks_per_page; i++) {
+	first_block = EXT4_PG_TO_LBLK(inode, folio->index);
+	for (i = 0; i < blocks_per_folio; i++) {
 		group = (first_block + i) >> 1;
 		if (group >= ngroups)
 			break;
@@ -1529,7 +1525,7 @@ static int ext4_mb_init_cache(struct folio *folio, char *incore, gfp_t gfp)
 
 out:
 	if (bh) {
-		for (i = 0; i < groups_per_page; i++)
+		for (i = 0; i < groups_per_folio; i++)
 			brelse(bh[i]);
 		if (bh != &bhs)
 			kfree(bh);
@@ -1538,55 +1534,57 @@ out:
 }
 
 /*
- * Lock the buddy and bitmap pages. This make sure other parallel init_group
- * on the same buddy page doesn't happen whild holding the buddy page lock.
- * Return locked buddy and bitmap pages on e4b struct. If buddy and bitmap
- * are on the same page e4b->bd_buddy_folio is NULL and return value is 0.
+ * Lock the buddy and bitmap folios. This makes sure other parallel init_group
+ * on the same buddy folio doesn't happen while holding the buddy folio lock.
+ * Return locked buddy and bitmap folios on e4b struct. If buddy and bitmap
+ * are on the same folio e4b->bd_buddy_folio is NULL and return value is 0.
  */
-static int ext4_mb_get_buddy_page_lock(struct super_block *sb,
+static int ext4_mb_get_buddy_folio_lock(struct super_block *sb,
 		ext4_group_t group, struct ext4_buddy *e4b, gfp_t gfp)
 {
 	struct inode *inode = EXT4_SB(sb)->s_buddy_cache;
-	int block, pnum, poff;
-	int blocks_per_page;
+	int block, pnum;
 	struct folio *folio;
 
 	e4b->bd_buddy_folio = NULL;
 	e4b->bd_bitmap_folio = NULL;
 
-	blocks_per_page = PAGE_SIZE / sb->s_blocksize;
 	/*
 	 * the buddy cache inode stores the block bitmap
 	 * and buddy information in consecutive blocks.
 	 * So for each group we need two blocks.
 	 */
 	block = group * 2;
-	pnum = block / blocks_per_page;
-	poff = block % blocks_per_page;
+	pnum = EXT4_LBLK_TO_PG(inode, block);
 	folio = __filemap_get_folio(inode->i_mapping, pnum,
 			FGP_LOCK | FGP_ACCESSED | FGP_CREAT, gfp);
 	if (IS_ERR(folio))
 		return PTR_ERR(folio);
 	BUG_ON(folio->mapping != inode->i_mapping);
+	WARN_ON_ONCE(folio_size(folio) < sb->s_blocksize);
 	e4b->bd_bitmap_folio = folio;
-	e4b->bd_bitmap = folio_address(folio) + (poff * sb->s_blocksize);
+	e4b->bd_bitmap = folio_address(folio) +
+			 offset_in_folio(folio, EXT4_LBLK_TO_B(inode, block));
 
-	if (blocks_per_page >= 2) {
-		/* buddy and bitmap are on the same page */
+	block++;
+	pnum = EXT4_LBLK_TO_PG(inode, block);
+	if (folio_contains(folio, pnum)) {
+		/* buddy and bitmap are on the same folio */
 		return 0;
 	}
 
-	/* blocks_per_page == 1, hence we need another page for the buddy */
-	folio = __filemap_get_folio(inode->i_mapping, block + 1,
+	/* we need another folio for the buddy */
+	folio = __filemap_get_folio(inode->i_mapping, pnum,
 			FGP_LOCK | FGP_ACCESSED | FGP_CREAT, gfp);
 	if (IS_ERR(folio))
 		return PTR_ERR(folio);
 	BUG_ON(folio->mapping != inode->i_mapping);
+	WARN_ON_ONCE(folio_size(folio) < sb->s_blocksize);
 	e4b->bd_buddy_folio = folio;
 	return 0;
 }
 
-static void ext4_mb_put_buddy_page_lock(struct ext4_buddy *e4b)
+static void ext4_mb_put_buddy_folio_lock(struct ext4_buddy *e4b)
 {
 	if (e4b->bd_bitmap_folio) {
 		folio_unlock(e4b->bd_bitmap_folio);
@@ -1600,7 +1598,7 @@ static void ext4_mb_put_buddy_page_lock(struct ext4_buddy *e4b)
 
 /*
  * Locking note:  This routine calls ext4_mb_init_cache(), which takes the
- * block group lock of all groups for this page; do not hold the BG lock when
+ * block group lock of all groups for this folio; do not hold the BG lock when
  * calling this routine!
  */
 static noinline_for_stack
@@ -1620,14 +1618,14 @@ int ext4_mb_init_group(struct super_block *sb, ext4_group_t group, gfp_t gfp)
 
 	/*
 	 * This ensures that we don't reinit the buddy cache
-	 * page which map to the group from which we are already
+	 * folio which map to the group from which we are already
 	 * allocating. If we are looking at the buddy cache we would
 	 * have taken a reference using ext4_mb_load_buddy and that
-	 * would have pinned buddy page to page cache.
-	 * The call to ext4_mb_get_buddy_page_lock will mark the
-	 * page accessed.
+	 * would have pinned buddy folio to page cache.
+	 * The call to ext4_mb_get_buddy_folio_lock will mark the
+	 * folio accessed.
 	 */
-	ret = ext4_mb_get_buddy_page_lock(sb, group, &e4b, gfp);
+	ret = ext4_mb_get_buddy_folio_lock(sb, group, &e4b, gfp);
 	if (ret || !EXT4_MB_GRP_NEED_INIT(this_grp)) {
 		/*
 		 * somebody initialized the group
@@ -1648,7 +1646,7 @@ int ext4_mb_init_group(struct super_block *sb, ext4_group_t group, gfp_t gfp)
 	if (e4b.bd_buddy_folio == NULL) {
 		/*
 		 * If both the bitmap and buddy are in
-		 * the same page we don't need to force
+		 * the same folio we don't need to force
 		 * init the buddy
 		 */
 		ret = 0;
@@ -1664,23 +1662,21 @@ int ext4_mb_init_group(struct super_block *sb, ext4_group_t group, gfp_t gfp)
 		goto err;
 	}
 err:
-	ext4_mb_put_buddy_page_lock(&e4b);
+	ext4_mb_put_buddy_folio_lock(&e4b);
 	return ret;
 }
 
 /*
  * Locking note:  This routine calls ext4_mb_init_cache(), which takes the
- * block group lock of all groups for this page; do not hold the BG lock when
+ * block group lock of all groups for this folio; do not hold the BG lock when
  * calling this routine!
  */
 static noinline_for_stack int
 ext4_mb_load_buddy_gfp(struct super_block *sb, ext4_group_t group,
 		       struct ext4_buddy *e4b, gfp_t gfp)
 {
-	int blocks_per_page;
 	int block;
 	int pnum;
-	int poff;
 	struct folio *folio;
 	int ret;
 	struct ext4_group_info *grp;
@@ -1690,7 +1686,6 @@ ext4_mb_load_buddy_gfp(struct super_block *sb, ext4_group_t group,
 	might_sleep();
 	mb_debug(sb, "load group %u\n", group);
 
-	blocks_per_page = PAGE_SIZE / sb->s_blocksize;
 	grp = ext4_get_group_info(sb, group);
 	if (!grp)
 		return -EFSCORRUPTED;
@@ -1718,8 +1713,7 @@ ext4_mb_load_buddy_gfp(struct super_block *sb, ext4_group_t group,
 	 * So for each group we need two blocks.
 	 */
 	block = group * 2;
-	pnum = block / blocks_per_page;
-	poff = block % blocks_per_page;
+	pnum = EXT4_LBLK_TO_PG(inode, block);
 
 	/* Avoid locking the folio in the fast path ... */
 	folio = __filemap_get_folio(inode->i_mapping, pnum, FGP_ACCESSED, 0);
@@ -1752,7 +1746,8 @@ ext4_mb_load_buddy_gfp(struct super_block *sb, ext4_group_t group,
 					goto err;
 				}
 				mb_cmp_bitmaps(e4b, folio_address(folio) +
-					       (poff * sb->s_blocksize));
+					offset_in_folio(folio,
+						EXT4_LBLK_TO_B(inode, block)));
 			}
 			folio_unlock(folio);
 		}
@@ -1768,12 +1763,18 @@ ext4_mb_load_buddy_gfp(struct super_block *sb, ext4_group_t group,
 
 	/* Folios marked accessed already */
 	e4b->bd_bitmap_folio = folio;
-	e4b->bd_bitmap = folio_address(folio) + (poff * sb->s_blocksize);
+	e4b->bd_bitmap = folio_address(folio) +
+			 offset_in_folio(folio, EXT4_LBLK_TO_B(inode, block));
 
 	block++;
-	pnum = block / blocks_per_page;
-	poff = block % blocks_per_page;
+	pnum = EXT4_LBLK_TO_PG(inode, block);
+	/* buddy and bitmap are on the same folio? */
+	if (folio_contains(folio, pnum)) {
+		folio_get(folio);
+		goto update_buddy;
+	}
 
+	/* we need another folio for the buddy */
 	folio = __filemap_get_folio(inode->i_mapping, pnum, FGP_ACCESSED, 0);
 	if (IS_ERR(folio) || !folio_test_uptodate(folio) || folio_test_locked(folio)) {
 		if (!IS_ERR(folio))
@@ -1808,9 +1809,11 @@ ext4_mb_load_buddy_gfp(struct super_block *sb, ext4_group_t group,
 		goto err;
 	}
 
+update_buddy:
 	/* Folios marked accessed already */
 	e4b->bd_buddy_folio = folio;
-	e4b->bd_buddy = folio_address(folio) + (poff * sb->s_blocksize);
+	e4b->bd_buddy = folio_address(folio) +
+			offset_in_folio(folio, EXT4_LBLK_TO_B(inode, block));
 
 	return 0;
 
@@ -2253,7 +2256,7 @@ static void ext4_mb_use_best_found(struct ext4_allocation_context *ac,
 	ac->ac_buddy = ret >> 16;
 
 	/*
-	 * take the page reference. We want the page to be pinned
+	 * take the folio reference. We want the folio to be pinned
 	 * so that we don't get a ext4_mb_init_cache_call for this
 	 * group until we update the bitmap. That would mean we
 	 * double allocate blocks. The reference is dropped
@@ -2265,7 +2268,7 @@ static void ext4_mb_use_best_found(struct ext4_allocation_context *ac,
 	folio_get(ac->ac_buddy_folio);
 	/* store last allocated for subsequent stream allocation */
 	if (ac->ac_flags & EXT4_MB_STREAM_ALLOC) {
-		int hash = ac->ac_inode->i_ino % sbi->s_mb_nr_global_goals;
+		int hash = (unsigned int)ac->ac_inode->i_ino % sbi->s_mb_nr_global_goals;
 
 		WRITE_ONCE(sbi->s_mb_last_groups[hash], ac->ac_f_ex.fe_group);
 	}
@@ -2858,8 +2861,6 @@ ext4_group_t ext4_mb_prefetch(struct super_block *sb, ext4_group_t group,
 
 	blk_start_plug(&plug);
 	while (nr-- > 0) {
-		struct ext4_group_desc *gdp = ext4_get_group_desc(sb, group,
-								  NULL);
 		struct ext4_group_info *grp = ext4_get_group_info(sb, group);
 
 		/*
@@ -2869,14 +2870,17 @@ ext4_group_t ext4_mb_prefetch(struct super_block *sb, ext4_group_t group,
 		 * prefetch once, so we avoid getblk() call, which can
 		 * be expensive.
 		 */
-		if (gdp && grp && !EXT4_MB_GRP_TEST_AND_SET_READ(grp) &&
-		    EXT4_MB_GRP_NEED_INIT(grp) &&
-		    ext4_free_group_clusters(sb, gdp) > 0 ) {
-			bh = ext4_read_block_bitmap_nowait(sb, group, true);
-			if (bh && !IS_ERR(bh)) {
-				if (!buffer_uptodate(bh) && cnt)
-					(*cnt)++;
-				brelse(bh);
+		if (grp && !EXT4_MB_GRP_TEST_AND_SET_READ(grp) &&
+		    EXT4_MB_GRP_NEED_INIT(grp)) {
+			struct ext4_group_desc *gdp = ext4_get_group_desc(sb, group, NULL);
+
+			if (gdp && ext4_free_group_clusters(sb, gdp) > 0) {
+				bh = ext4_read_block_bitmap_nowait(sb, group, true);
+				if (!IS_ERR_OR_NULL(bh)) {
+					if (!buffer_uptodate(bh) && cnt)
+						(*cnt)++;
+					brelse(bh);
+				}
 			}
 		}
 		if (++group >= ngroups)
@@ -2963,7 +2967,7 @@ static int ext4_mb_scan_group(struct ext4_allocation_context *ac,
 	if (cr < CR_ANY_FREE && spin_is_locked(ext4_group_lock_ptr(sb, group)))
 		return 0;
 
-	/* This now checks without needing the buddy page */
+	/* This now checks without needing the buddy folio */
 	ret = ext4_mb_good_group_nolock(ac, group, cr);
 	if (ret <= 0) {
 		if (!ac->ac_first_err)
@@ -3035,7 +3039,7 @@ ext4_mb_regular_allocator(struct ext4_allocation_context *ac)
 
 	/* if stream allocation is enabled, use global goal */
 	if (ac->ac_flags & EXT4_MB_STREAM_ALLOC) {
-		int hash = ac->ac_inode->i_ino % sbi->s_mb_nr_global_goals;
+		int hash = (unsigned int)ac->ac_inode->i_ino % sbi->s_mb_nr_global_goals;
 
 		ac->ac_g_ex.fe_group = READ_ONCE(sbi->s_mb_last_groups[hash]);
 		ac->ac_g_ex.fe_start = -1;
@@ -3523,6 +3527,8 @@ static int ext4_mb_init_backend(struct super_block *sb)
 	 * this will avoid confusion if it ever shows up during debugging. */
 	sbi->s_buddy_cache->i_ino = EXT4_BAD_INO;
 	EXT4_I(sbi->s_buddy_cache)->i_disksize = 0;
+	ext4_set_inode_mapping_order(sbi->s_buddy_cache);
+
 	for (i = 0; i < ngroups; i++) {
 		cond_resched();
 		desc = ext4_get_group_desc(sb, i, NULL);
@@ -3753,8 +3759,7 @@ int ext4_mb_init(struct super_block *sb)
 	} while (i < MB_NUM_ORDERS(sb));
 
 	sbi->s_mb_avg_fragment_size =
-		kmalloc_array(MB_NUM_ORDERS(sb), sizeof(struct xarray),
-			GFP_KERNEL);
+		kmalloc_objs(struct xarray, MB_NUM_ORDERS(sb));
 	if (!sbi->s_mb_avg_fragment_size) {
 		ret = -ENOMEM;
 		goto out;
@@ -3763,8 +3768,7 @@ int ext4_mb_init(struct super_block *sb)
 		xa_init(&sbi->s_mb_avg_fragment_size[i]);
 
 	sbi->s_mb_largest_free_orders =
-		kmalloc_array(MB_NUM_ORDERS(sb), sizeof(struct xarray),
-			GFP_KERNEL);
+		kmalloc_objs(struct xarray, MB_NUM_ORDERS(sb));
 	if (!sbi->s_mb_largest_free_orders) {
 		ret = -ENOMEM;
 		goto out;
@@ -3816,8 +3820,8 @@ int ext4_mb_init(struct super_block *sb)
 
 	sbi->s_mb_nr_global_goals = umin(num_possible_cpus(),
 					 DIV_ROUND_UP(sbi->s_groups_count, 4));
-	sbi->s_mb_last_groups = kcalloc(sbi->s_mb_nr_global_goals,
-					sizeof(ext4_group_t), GFP_KERNEL);
+	sbi->s_mb_last_groups = kzalloc_objs(ext4_group_t,
+					     sbi->s_mb_nr_global_goals);
 	if (sbi->s_mb_last_groups == NULL) {
 		ret = -ENOMEM;
 		goto out;
@@ -3837,7 +3841,7 @@ int ext4_mb_init(struct super_block *sb)
 		spin_lock_init(&lg->lg_prealloc_lock);
 	}
 
-	if (bdev_nonrot(sb->s_bdev))
+	if (!bdev_rot(sb->s_bdev))
 		sbi->s_mb_max_linear_groups = 0;
 	else
 		sbi->s_mb_max_linear_groups = MB_DEFAULT_LINEAR_LIMIT;
@@ -4081,7 +4085,7 @@ void ext4_exit_mballoc(void)
 
 #define EXT4_MB_BITMAP_MARKED_CHECK 0x0001
 #define EXT4_MB_SYNC_UPDATE 0x0002
-static int
+int
 ext4_mb_mark_context(handle_t *handle, struct super_block *sb, bool state,
 		     ext4_group_t group, ext4_grpblk_t blkoff,
 		     ext4_grpblk_t len, int flags, ext4_grpblk_t *ret_changed)
@@ -4273,8 +4277,7 @@ void ext4_mb_mark_bb(struct super_block *sb, ext4_fsblk_t block,
 		 * get the corresponding group metadata to work with.
 		 * For this we have goto again loop.
 		 */
-		thisgrp_len = min_t(unsigned int, (unsigned int)len,
-			EXT4_BLOCKS_PER_GROUP(sb) - EXT4_C2B(sbi, blkoff));
+		thisgrp_len = min(len, EXT4_BLOCKS_PER_GROUP(sb) - EXT4_C2B(sbi, blkoff));
 		clen = EXT4_NUM_B2C(sbi, thisgrp_len);
 
 		if (!ext4_sb_block_valid(sb, NULL, block, thisgrp_len)) {
@@ -4559,22 +4562,16 @@ ext4_mb_normalize_request(struct ext4_allocation_context *ac,
 		(req <= (size) || max <= (chunk_size))
 
 	/* first, try to predict filesize */
-	/* XXX: should this table be tunable? */
 	start_off = 0;
-	if (size <= 16 * 1024) {
-		size = 16 * 1024;
-	} else if (size <= 32 * 1024) {
-		size = 32 * 1024;
-	} else if (size <= 64 * 1024) {
-		size = 64 * 1024;
-	} else if (size <= 128 * 1024) {
-		size = 128 * 1024;
-	} else if (size <= 256 * 1024) {
-		size = 256 * 1024;
-	} else if (size <= 512 * 1024) {
-		size = 512 * 1024;
-	} else if (size <= 1024 * 1024) {
-		size = 1024 * 1024;
+	if (size <= SZ_1M) {
+		/*
+		 * For files up to 1MB, round up the preallocation size to
+		 * the next power of two, with a minimum of 16KB.
+		 */
+		if (size <= (unsigned long)SZ_16K)
+			size = SZ_16K;
+		else
+			size = roundup_pow_of_two(size);
 	} else if (NRL_CHECK_SIZE(size, 4 * 1024 * 1024, max, 2 * 1024)) {
 		start_off = ((loff_t)ac->ac_o_ex.fe_logical >>
 						(21 - bsbits)) << 21;
@@ -4739,7 +4736,7 @@ static void ext4_discard_allocated_blocks(struct ext4_allocation_context *ac)
 				   "ext4: mb_load_buddy failed (%d)", err))
 			/*
 			 * This should never happen since we pin the
-			 * pages in the ext4_allocation_context so
+			 * folios in the ext4_allocation_context so
 			 * ext4_mb_load_buddy() should never fail.
 			 */
 			return;
@@ -5626,7 +5623,7 @@ void ext4_discard_preallocations(struct inode *inode)
 	if (EXT4_SB(sb)->s_mount_state & EXT4_FC_REPLAY)
 		return;
 
-	mb_debug(sb, "discard preallocation for inode %lu\n",
+	mb_debug(sb, "discard preallocation for inode %llu\n",
 		 inode->i_ino);
 	trace_ext4_discard_preallocations(inode,
 			atomic_read(&ei->i_prealloc_active));
@@ -7186,6 +7183,102 @@ out_unload:
 	return error;
 }
 
-#ifdef CONFIG_EXT4_KUNIT_TESTS
-#include "mballoc-test.c"
+#if IS_ENABLED(CONFIG_EXT4_KUNIT_TESTS)
+void mb_clear_bits_test(void *bm, int cur, int len)
+{
+	 mb_clear_bits(bm, cur, len);
+}
+EXPORT_SYMBOL_FOR_EXT4_TEST(mb_clear_bits_test);
+
+ext4_fsblk_t
+ext4_mb_new_blocks_simple_test(struct ext4_allocation_request *ar,
+			       int *errp)
+{
+	return ext4_mb_new_blocks_simple(ar, errp);
+}
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_mb_new_blocks_simple_test);
+
+int mb_find_next_zero_bit_test(void *addr, int max, int start)
+{
+	return mb_find_next_zero_bit(addr, max, start);
+}
+EXPORT_SYMBOL_FOR_EXT4_TEST(mb_find_next_zero_bit_test);
+
+int mb_find_next_bit_test(void *addr, int max, int start)
+{
+	return mb_find_next_bit(addr, max, start);
+}
+EXPORT_SYMBOL_FOR_EXT4_TEST(mb_find_next_bit_test);
+
+void mb_clear_bit_test(int bit, void *addr)
+{
+	mb_clear_bit(bit, addr);
+}
+EXPORT_SYMBOL_FOR_EXT4_TEST(mb_clear_bit_test);
+
+int mb_test_bit_test(int bit, void *addr)
+{
+	return mb_test_bit(bit, addr);
+}
+EXPORT_SYMBOL_FOR_EXT4_TEST(mb_test_bit_test);
+
+int ext4_mb_mark_diskspace_used_test(struct ext4_allocation_context *ac,
+				     handle_t *handle)
+{
+	return ext4_mb_mark_diskspace_used(ac, handle);
+}
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_mb_mark_diskspace_used_test);
+
+int mb_mark_used_test(struct ext4_buddy *e4b, struct ext4_free_extent *ex)
+{
+	return mb_mark_used(e4b, ex);
+}
+EXPORT_SYMBOL_FOR_EXT4_TEST(mb_mark_used_test);
+
+void ext4_mb_generate_buddy_test(struct super_block *sb, void *buddy,
+				 void *bitmap, ext4_group_t group,
+				 struct ext4_group_info *grp)
+{
+	ext4_mb_generate_buddy(sb, buddy, bitmap, group, grp);
+}
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_mb_generate_buddy_test);
+
+int ext4_mb_load_buddy_test(struct super_block *sb, ext4_group_t group,
+			    struct ext4_buddy *e4b)
+{
+	return ext4_mb_load_buddy(sb, group, e4b);
+}
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_mb_load_buddy_test);
+
+void ext4_mb_unload_buddy_test(struct ext4_buddy *e4b)
+{
+	ext4_mb_unload_buddy(e4b);
+}
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_mb_unload_buddy_test);
+
+void mb_free_blocks_test(struct inode *inode, struct ext4_buddy *e4b,
+			 int first, int count)
+{
+	mb_free_blocks(inode, e4b, first, count);
+}
+EXPORT_SYMBOL_FOR_EXT4_TEST(mb_free_blocks_test);
+
+void ext4_free_blocks_simple_test(struct inode *inode, ext4_fsblk_t block,
+				  unsigned long count)
+{
+	return ext4_free_blocks_simple(inode, block, count);
+}
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_free_blocks_simple_test);
+
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_wait_block_bitmap);
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_mb_init);
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_get_group_desc);
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_count_free_clusters);
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_get_group_info);
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_free_group_clusters_set);
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_mb_release);
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_read_block_bitmap_nowait);
+EXPORT_SYMBOL_FOR_EXT4_TEST(mb_set_bits);
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_fc_init_inode);
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_mb_mark_context);
 #endif

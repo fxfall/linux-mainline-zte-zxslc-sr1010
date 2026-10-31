@@ -188,7 +188,7 @@ static int ttusbir_probe(struct usb_interface *intf,
 	int altsetting = -1;
 	u8 *buffer;
 
-	tt = kzalloc(sizeof(*tt), GFP_KERNEL);
+	tt = kzalloc_obj(*tt);
 	buffer = kzalloc(5, GFP_KERNEL);
 	rc = rc_allocate_device(RC_DRIVER_IR_RAW);
 	if (!tt || !rc || !buffer) {
@@ -376,8 +376,8 @@ static void ttusbir_disconnect(struct usb_interface *intf)
 	}
 	usb_kill_urb(tt->bulk_urb);
 	usb_free_urb(tt->bulk_urb);
-	kfree(tt->bulk_buffer);
 	rc_free_device(tt->rc);
+	kfree(tt->bulk_buffer);
 	usb_set_intfdata(intf, NULL);
 	kfree(tt);
 }

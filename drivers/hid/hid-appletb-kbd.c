@@ -175,7 +175,7 @@ static void appletb_inactivity_work(struct work_struct *work)
 		if (!kbd->has_dimmed) {
 			backlight_device_set_brightness(kbd->backlight_dev, 1);
 			kbd->has_dimmed = true;
-			mod_delayed_work(system_wq, &kbd->inactivity_work,
+			mod_delayed_work(system_dfl_wq, &kbd->inactivity_work,
 					 secs_to_jiffies(appletb_tb_idle_timeout));
 		} else if (!kbd->has_turned_off) {
 			backlight_device_set_brightness(kbd->backlight_dev, 0);
@@ -201,7 +201,7 @@ static void reset_inactivity_timer(struct appletb_kbd *kbd)
 			kbd->has_turned_off = false;
 			schedule_work(&kbd->restore_brightness_work);
 		}
-		mod_delayed_work(system_wq, &kbd->inactivity_work,
+		mod_delayed_work(system_dfl_wq, &kbd->inactivity_work,
 				 secs_to_jiffies(appletb_tb_dim_timeout));
 	}
 }
@@ -423,7 +423,7 @@ static int appletb_kbd_probe(struct hid_device *hdev, const struct hid_device_id
 		INIT_DELAYED_WORK(&kbd->inactivity_work, appletb_inactivity_work);
 		INIT_WORK(&kbd->restore_brightness_work,
 			  appletb_restore_brightness_work);
-		mod_delayed_work(system_wq, &kbd->inactivity_work,
+		mod_delayed_work(system_dfl_wq, &kbd->inactivity_work,
 				 secs_to_jiffies(appletb_tb_dim_timeout));
 	}
 
@@ -482,7 +482,6 @@ static void appletb_kbd_remove(struct hid_device *hdev)
 	}
 }
 
-#ifdef CONFIG_PM
 static int appletb_kbd_suspend(struct hid_device *hdev, pm_message_t msg)
 {
 	struct appletb_kbd *kbd = hid_get_drvdata(hdev);
@@ -501,7 +500,6 @@ static int appletb_kbd_resume(struct hid_device *hdev)
 
 	return 0;
 }
-#endif
 
 static const struct hid_device_id appletb_kbd_hid_ids[] = {
 	/* MacBook Pro's 2018, 2019, with T2 chip: iBridge Display */
@@ -517,11 +515,9 @@ static struct hid_driver appletb_kbd_hid_driver = {
 	.remove = appletb_kbd_remove,
 	.event = appletb_kbd_hid_event,
 	.input_configured = appletb_kbd_input_configured,
-#ifdef CONFIG_PM
-	.suspend = appletb_kbd_suspend,
-	.resume = appletb_kbd_resume,
-	.reset_resume = appletb_kbd_resume,
-#endif
+	.suspend = pm_ptr(appletb_kbd_suspend),
+	.resume = pm_ptr(appletb_kbd_resume),
+	.reset_resume = pm_ptr(appletb_kbd_resume),
 	.driver.dev_groups = appletb_kbd_groups,
 };
 module_hid_driver(appletb_kbd_hid_driver);

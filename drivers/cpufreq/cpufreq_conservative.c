@@ -103,10 +103,6 @@ static unsigned int cs_dbs_update(struct cpufreq_policy *policy)
 	if (load > dbs_data->up_threshold) {
 		dbs_info->down_skip = 0;
 
-		/* if we are already at full speed then break out early */
-		if (requested_freq == policy->max)
-			goto out;
-
 		requested_freq += freq_step;
 		if (requested_freq > policy->max)
 			requested_freq = policy->max;
@@ -124,13 +120,7 @@ static unsigned int cs_dbs_update(struct cpufreq_policy *policy)
 
 	/* Check for frequency decrease */
 	if (load < cs_tuners->down_threshold) {
-		/*
-		 * if we cannot reduce the frequency anymore, break out early
-		 */
-		if (requested_freq == policy->min)
-			goto out;
-
-		if (requested_freq > freq_step)
+		if (requested_freq > policy->min + freq_step)
 			requested_freq -= freq_step;
 		else
 			requested_freq = policy->min;
@@ -273,7 +263,7 @@ static struct policy_dbs_info *cs_alloc(void)
 {
 	struct cs_policy_dbs_info *dbs_info;
 
-	dbs_info = kzalloc(sizeof(*dbs_info), GFP_KERNEL);
+	dbs_info = kzalloc_obj(*dbs_info);
 	return dbs_info ? &dbs_info->policy_dbs : NULL;
 }
 
@@ -286,7 +276,7 @@ static int cs_init(struct dbs_data *dbs_data)
 {
 	struct cs_dbs_tuners *tuners;
 
-	tuners = kzalloc(sizeof(*tuners), GFP_KERNEL);
+	tuners = kzalloc_obj(*tuners);
 	if (!tuners)
 		return -ENOMEM;
 

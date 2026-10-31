@@ -208,6 +208,9 @@ static const struct mmc_fixup __maybe_unused sdio_fixup_methods[] = {
 	SDIO_FIXUP(SDIO_VENDOR_ID_MARVELL, SDIO_DEVICE_ID_MARVELL_8887_F0,
 		   add_limit_rate_quirk, 150000000),
 
+	SDIO_FIXUP(SDIO_VENDOR_ID_NXP, SDIO_DEVICE_ID_NXP_IW61X_BASE,
+		   add_quirk, MMC_QUIRK_BLKSZ_FOR_BYTE_MODE),
+
 	END_FIXUP
 };
 
@@ -225,14 +228,9 @@ static const struct mmc_fixup __maybe_unused sdio_card_init_methods[] = {
 static inline bool mmc_fixup_of_compatible_match(struct mmc_card *card,
 						 const char *compatible)
 {
-	struct device_node *np;
-
-	for_each_child_of_node(mmc_dev(card->host)->of_node, np) {
-		if (of_device_is_compatible(np, compatible)) {
-			of_node_put(np);
+	for_each_child_of_node_scoped(mmc_dev(card->host)->of_node, np)
+		if (of_device_is_compatible(np, compatible))
 			return true;
-		}
-	}
 
 	return false;
 }

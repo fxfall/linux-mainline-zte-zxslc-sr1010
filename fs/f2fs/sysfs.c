@@ -35,6 +35,7 @@ enum {
 #ifdef CONFIG_F2FS_FAULT_INJECTION
 	FAULT_INFO_RATE,	/* struct f2fs_fault_info */
 	FAULT_INFO_TYPE,	/* struct f2fs_fault_info */
+	FAULT_INFO_TIMEOUT,	/* struct f2fs_fault_info */
 #endif
 	RESERVED_BLOCKS,	/* struct f2fs_sb_info */
 	CPRC_INFO,	/* struct ckpt_req_control */
@@ -74,7 +75,7 @@ static ssize_t f2fs_sbi_show(struct f2fs_attr *a,
 static unsigned char *__struct_ptr(struct f2fs_sb_info *sbi, int struct_type)
 {
 	if (struct_type == GC_THREAD)
-		return (unsigned char *)sbi->gc_thread;
+		return (unsigned char *)&sbi->gc_thread;
 	else if (struct_type == SM_INFO)
 		return (unsigned char *)SM_I(sbi);
 	else if (struct_type == DCC_INFO)
@@ -85,7 +86,8 @@ static unsigned char *__struct_ptr(struct f2fs_sb_info *sbi, int struct_type)
 		return (unsigned char *)sbi;
 #ifdef CONFIG_F2FS_FAULT_INJECTION
 	else if (struct_type == FAULT_INFO_RATE ||
-					struct_type == FAULT_INFO_TYPE)
+		struct_type == FAULT_INFO_TYPE ||
+		struct_type == FAULT_INFO_TIMEOUT)
 		return (unsigned char *)&F2FS_OPTION(sbi).fault_info;
 #endif
 #ifdef CONFIG_F2FS_STAT_FS
@@ -336,6 +338,14 @@ static ssize_t avg_vblocks_show(struct f2fs_attr *a,
 	f2fs_update_sit_info(sbi);
 	return sysfs_emit(buf, "%llu\n", (unsigned long long)(si->avg_vblocks));
 }
+
+static ssize_t defrag_blocks_show(struct f2fs_attr *a,
+				struct f2fs_sb_info *sbi, char *buf)
+{
+	struct f2fs_stat_info *si = F2FS_STAT(sbi);
+
+	return sysfs_emit(buf, "%llu\n", (unsigned long long)(si->defrag_blks));
+}
 #endif
 
 static ssize_t main_blkaddr_show(struct f2fs_attr *a,
@@ -547,7 +557,7 @@ out:
 			return -EINVAL;
 
 		cprc->ckpt_thread_ioprio = IOPRIO_PRIO_VALUE(class, level);
-		if (test_opt(sbi, MERGE_CHECKPOINT)) {
+		if (cprc->f2fs_issue_ckpt) {
 			ret = set_task_ioprio(cprc->f2fs_issue_ckpt,
 					cprc->ckpt_thread_ioprio);
 			if (ret)
@@ -571,6 +581,12 @@ out:
 	if (a->struct_type == FAULT_INFO_RATE) {
 		if (f2fs_build_fault_attr(sbi, t, 0, FAULT_RATE))
 			return -EINVAL;
+		return count;
+	}
+	if (a->struct_type == FAULT_INFO_TIMEOUT) {
+		if (f2fs_build_fault_attr(sbi, 0, t, FAULT_TIMEOUT))
+			return -EINVAL;
+		f2fs_simulate_lock_timeout(sbi);
 		return count;
 	}
 #endif
@@ -648,20 +664,20 @@ out:
 			sbi->gc_mode = GC_NORMAL;
 		} else if (t == 1) {
 			sbi->gc_mode = GC_URGENT_HIGH;
-			if (sbi->gc_thread) {
-				sbi->gc_thread->gc_wake = true;
+			if (sbi->gc_thread.f2fs_gc_task) {
+				sbi->gc_thread.gc_wake = true;
 				wake_up_interruptible_all(
-					&sbi->gc_thread->gc_wait_queue_head);
+					&sbi->gc_thread.gc_wait_queue_head);
 				wake_up_discard_thread(sbi, true);
 			}
 		} else if (t == 2) {
 			sbi->gc_mode = GC_URGENT_LOW;
 		} else if (t == 3) {
 			sbi->gc_mode = GC_URGENT_MID;
-			if (sbi->gc_thread) {
-				sbi->gc_thread->gc_wake = true;
+			if (sbi->gc_thread.f2fs_gc_task) {
+				sbi->gc_thread.gc_wake = true;
 				wake_up_interruptible_all(
-					&sbi->gc_thread->gc_wait_queue_head);
+					&sbi->gc_thread.gc_wait_queue_head);
 			}
 		} else {
 			return -EINVAL;
@@ -918,14 +934,14 @@ out:
 	if (!strcmp(a->attr.name, "gc_boost_gc_multiple")) {
 		if (t < 1 || t > SEGS_PER_SEC(sbi))
 			return -EINVAL;
-		sbi->gc_thread->boost_gc_multiple = (unsigned int)t;
+		sbi->gc_thread.boost_gc_multiple = (unsigned int)t;
 		return count;
 	}
 
 	if (!strcmp(a->attr.name, "gc_boost_gc_greedy")) {
 		if (t > GC_GREEDY)
 			return -EINVAL;
-		sbi->gc_thread->boost_gc_greedy = (unsigned int)t;
+		sbi->gc_thread.boost_gc_greedy = (unsigned int)t;
 		return count;
 	}
 
@@ -950,6 +966,35 @@ out:
 		return count;
 	}
 
+	if (!strcmp(a->attr.name, "adjust_lock_priority")) {
+		if (t >= BIT(LOCK_NAME_MAX - 1))
+			return -EINVAL;
+		sbi->adjust_lock_priority = t;
+		return count;
+	}
+
+	if (!strcmp(a->attr.name, "lock_duration_priority")) {
+		if (t < NICE_TO_PRIO(MIN_NICE) || t > NICE_TO_PRIO(MAX_NICE))
+			return -EINVAL;
+		sbi->lock_duration_priority = t;
+		return count;
+	}
+
+	if (!strcmp(a->attr.name, "critical_task_priority")) {
+		if (t < NICE_TO_PRIO(MIN_NICE) || t > NICE_TO_PRIO(MAX_NICE))
+			return -EINVAL;
+		if (!capable(CAP_SYS_NICE))
+			return -EPERM;
+		sbi->critical_task_priority = t;
+		if (sbi->cprc_info.f2fs_issue_ckpt)
+			set_user_nice(sbi->cprc_info.f2fs_issue_ckpt,
+					PRIO_TO_NICE(sbi->critical_task_priority));
+		if (sbi->gc_thread.f2fs_gc_task)
+			set_user_nice(sbi->gc_thread.f2fs_gc_task,
+					PRIO_TO_NICE(sbi->critical_task_priority));
+		return count;
+	}
+
 	__sbi_store_value(a, sbi, ptr + a->offset, t);
 
 	return count;
@@ -962,13 +1007,15 @@ static ssize_t f2fs_sbi_store(struct f2fs_attr *a,
 	ssize_t ret;
 	bool gc_entry = (!strcmp(a->attr.name, "gc_urgent") ||
 					a->struct_type == GC_THREAD);
+	bool thread_entry = !strcmp(a->attr.name, "ckpt_thread_ioprio") ||
+			!strcmp(a->attr.name, "critical_task_priority");
 
-	if (gc_entry) {
+	if (gc_entry || thread_entry) {
 		if (!down_read_trylock(&sbi->sb->s_umount))
 			return -EAGAIN;
 	}
 	ret = __sbi_store(a, sbi, buf, count);
-	if (gc_entry)
+	if (gc_entry || thread_entry)
 		up_read(&sbi->sb->s_umount);
 
 	return ret;
@@ -1221,6 +1268,7 @@ F2FS_SBI_RW_ATTR(gc_idle_interval, interval_time[GC_TIME]);
 F2FS_SBI_RW_ATTR(umount_discard_timeout, interval_time[UMOUNT_DISCARD_TIMEOUT]);
 F2FS_SBI_RW_ATTR(gc_pin_file_thresh, gc_pin_file_threshold);
 F2FS_SBI_RW_ATTR(gc_reclaimed_segments, gc_reclaimed_segs);
+F2FS_SBI_RW_ATTR(max_atc_write_bio_size, max_atc_write_bio_size);
 F2FS_SBI_GENERAL_RW_ATTR(max_victim_search);
 F2FS_SBI_GENERAL_RW_ATTR(migration_granularity);
 F2FS_SBI_GENERAL_RW_ATTR(migration_window_granularity);
@@ -1260,11 +1308,17 @@ F2FS_SBI_GENERAL_RW_ATTR(last_age_weight);
 F2FS_SBI_GENERAL_RW_ATTR(max_read_extent_count);
 #ifdef CONFIG_BLK_DEV_ZONED
 F2FS_SBI_GENERAL_RO_ATTR(unusable_blocks_per_sec);
+F2FS_SBI_GENERAL_RO_ATTR(max_open_zones);
 F2FS_SBI_GENERAL_RW_ATTR(blkzone_alloc_policy);
 #endif
 F2FS_SBI_GENERAL_RW_ATTR(carve_out);
 F2FS_SBI_GENERAL_RW_ATTR(reserved_pin_section);
+F2FS_SBI_GENERAL_RO_ATTR(pinned_area_max_secno);
 F2FS_SBI_GENERAL_RW_ATTR(bggc_io_aware);
+F2FS_SBI_GENERAL_RW_ATTR(max_lock_elapsed_time);
+F2FS_SBI_GENERAL_RW_ATTR(lock_duration_priority);
+F2FS_SBI_GENERAL_RW_ATTR(adjust_lock_priority);
+F2FS_SBI_GENERAL_RW_ATTR(critical_task_priority);
 
 /* STAT_INFO ATTR */
 #ifdef CONFIG_F2FS_STAT_FS
@@ -1278,6 +1332,7 @@ STAT_INFO_RO_ATTR(gc_background_calls, gc_call_count[BACKGROUND]);
 #ifdef CONFIG_F2FS_FAULT_INJECTION
 FAULT_INFO_GENERAL_RW_ATTR(FAULT_INFO_RATE, inject_rate);
 FAULT_INFO_GENERAL_RW_ATTR(FAULT_INFO_TYPE, inject_type);
+FAULT_INFO_GENERAL_RW_ATTR(FAULT_INFO_TIMEOUT, inject_lock_timeout);
 #endif
 
 /* RESERVED_BLOCKS ATTR */
@@ -1311,6 +1366,7 @@ F2FS_GENERAL_RO_ATTR(gc_mode);
 F2FS_GENERAL_RO_ATTR(moved_blocks_background);
 F2FS_GENERAL_RO_ATTR(moved_blocks_foreground);
 F2FS_GENERAL_RO_ATTR(avg_vblocks);
+F2FS_GENERAL_RO_ATTR(defrag_blocks);
 #endif
 
 #ifdef CONFIG_FS_ENCRYPTION
@@ -1347,6 +1403,7 @@ F2FS_FEATURE_RO_ATTR(pin_file);
 F2FS_FEATURE_RO_ATTR(linear_lookup);
 #endif
 F2FS_FEATURE_RO_ATTR(packed_ssa);
+F2FS_FEATURE_RO_ATTR(fserror);
 
 #define ATTR_LIST(name) (&f2fs_attr_##name.attr)
 static struct attribute *f2fs_attrs[] = {
@@ -1407,6 +1464,7 @@ static struct attribute *f2fs_attrs[] = {
 #ifdef CONFIG_F2FS_FAULT_INJECTION
 	ATTR_LIST(inject_rate),
 	ATTR_LIST(inject_type),
+	ATTR_LIST(inject_lock_timeout),
 #endif
 	ATTR_LIST(data_io_flag),
 	ATTR_LIST(node_io_flag),
@@ -1432,9 +1490,11 @@ static struct attribute *f2fs_attrs[] = {
 	ATTR_LIST(moved_blocks_foreground),
 	ATTR_LIST(moved_blocks_background),
 	ATTR_LIST(avg_vblocks),
+	ATTR_LIST(defrag_blocks),
 #endif
 #ifdef CONFIG_BLK_DEV_ZONED
 	ATTR_LIST(unusable_blocks_per_sec),
+	ATTR_LIST(max_open_zones),
 	ATTR_LIST(blkzone_alloc_policy),
 #endif
 #ifdef CONFIG_F2FS_FS_COMPRESSION
@@ -1453,6 +1513,7 @@ static struct attribute *f2fs_attrs[] = {
 	ATTR_LIST(seq_file_ra_mul),
 	ATTR_LIST(gc_segment_mode),
 	ATTR_LIST(gc_reclaimed_segments),
+	ATTR_LIST(max_atc_write_bio_size),
 	ATTR_LIST(max_fragment_chunk),
 	ATTR_LIST(max_fragment_hole),
 	ATTR_LIST(current_atomic_write),
@@ -1465,8 +1526,13 @@ static struct attribute *f2fs_attrs[] = {
 	ATTR_LIST(max_read_extent_count),
 	ATTR_LIST(carve_out),
 	ATTR_LIST(reserved_pin_section),
+	ATTR_LIST(pinned_area_max_secno),
 	ATTR_LIST(allocate_section_hint),
 	ATTR_LIST(allocate_section_policy),
+	ATTR_LIST(max_lock_elapsed_time),
+	ATTR_LIST(lock_duration_priority),
+	ATTR_LIST(adjust_lock_priority),
+	ATTR_LIST(critical_task_priority),
 	NULL,
 };
 ATTRIBUTE_GROUPS(f2fs);
@@ -1507,6 +1573,7 @@ static struct attribute *f2fs_feat_attrs[] = {
 	BASE_ATTR_LIST(linear_lookup),
 #endif
 	BASE_ATTR_LIST(packed_ssa),
+	BASE_ATTR_LIST(fserror),
 	NULL,
 };
 ATTRIBUTE_GROUPS(f2fs_feat);

@@ -374,12 +374,6 @@ struct mtd_info {
 	struct mtd_ecc_stats ecc_stats;
 	/* Subpage shift (NAND) */
 	int subpage_sft;
-	/*
-	 * A page can be programmed only once between two erases: the ECC of the
-	 * whole page is generated at every program and merged with what the
-	 * page already holds, so a page written in pieces cannot be read back.
-	 */
-	bool program_once;
 
 	void *priv;
 
@@ -684,9 +678,6 @@ extern int mtd_device_parse_register(struct mtd_info *mtd,
 				     struct mtd_part_parser_data *parser_data,
 				     const struct mtd_partition *defparts,
 				     int defnr_parts);
-int mtd_device_parse_register_partitions_only(struct mtd_info *mtd,
-					      const char * const *part_probe_types,
-					      struct mtd_part_parser_data *parser_data);
 #define mtd_device_register(master, parts, nr_parts)	\
 	mtd_device_parse_register(master, NULL, NULL, parts, nr_parts)
 extern int mtd_device_unregister(struct mtd_info *master);

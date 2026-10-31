@@ -89,19 +89,12 @@ static inline void rq_sched_info_depart  (struct rq *rq, unsigned long long delt
 
 #endif /* CONFIG_SCHEDSTATS */
 
-#ifdef CONFIG_FAIR_GROUP_SCHED
-struct sched_entity_stats {
-	struct sched_entity     se;
-	struct sched_statistics stats;
-} __no_randomize_layout;
-#endif
-
 static inline struct sched_statistics *
 __schedstats_from_se(struct sched_entity *se)
 {
 #ifdef CONFIG_FAIR_GROUP_SCHED
 	if (!entity_is_task(se))
-		return &container_of(se, struct sched_entity_stats, se)->stats;
+		return &container_of(se, struct cfs_tg_state, se)->stats;
 #endif
 	return &task_of(se)->stats;
 }
@@ -211,7 +204,7 @@ static inline void psi_ttwu_dequeue(struct task_struct *p)
 
 		rq = __task_rq_lock(p, &rf);
 		psi_task_change(p, p->psi_flags, 0);
-		__task_rq_unlock(rq, &rf);
+		__task_rq_unlock(rq, p, &rf);
 	}
 }
 
@@ -253,8 +246,10 @@ static inline void sched_info_dequeue(struct rq *rq, struct task_struct *t)
 	delta = rq_clock(rq) - t->sched_info.last_queued;
 	t->sched_info.last_queued = 0;
 	t->sched_info.run_delay += delta;
-	if (delta > t->sched_info.max_run_delay)
+	if (delta > t->sched_info.max_run_delay) {
 		t->sched_info.max_run_delay = delta;
+		ktime_get_real_ts64(&t->sched_info.max_run_delay_ts);
+	}
 	if (delta && (!t->sched_info.min_run_delay || delta < t->sched_info.min_run_delay))
 		t->sched_info.min_run_delay = delta;
 	rq_sched_info_dequeue(rq, delta);
@@ -278,8 +273,10 @@ static void sched_info_arrive(struct rq *rq, struct task_struct *t)
 	t->sched_info.run_delay += delta;
 	t->sched_info.last_arrival = now;
 	t->sched_info.pcount++;
-	if (delta > t->sched_info.max_run_delay)
+	if (delta > t->sched_info.max_run_delay) {
 		t->sched_info.max_run_delay = delta;
+		ktime_get_real_ts64(&t->sched_info.max_run_delay_ts);
+	}
 	if (delta && (!t->sched_info.min_run_delay || delta < t->sched_info.min_run_delay))
 		t->sched_info.min_run_delay = delta;
 

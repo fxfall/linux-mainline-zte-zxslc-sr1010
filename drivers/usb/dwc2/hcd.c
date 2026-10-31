@@ -3823,7 +3823,7 @@ static struct dwc2_hcd_urb *dwc2_hcd_urb_alloc(struct dwc2_hsotg *hsotg,
 {
 	struct dwc2_hcd_urb *urb;
 
-	urb = kzalloc(struct_size(urb, iso_descs, iso_desc_count), mem_flags);
+	urb = kzalloc_flex(*urb, iso_descs, iso_desc_count, mem_flags);
 	if (urb)
 		urb->packet_count = iso_desc_count;
 	return urb;
@@ -4743,7 +4743,7 @@ static int _dwc2_hcd_urb_enqueue(struct usb_hcd *hcd, struct urb *urb,
 		qh_allocated = true;
 	}
 
-	qtd = kzalloc(sizeof(*qtd), mem_flags);
+	qtd = kzalloc_obj(*qtd, mem_flags);
 	if (!qtd) {
 		retval = -ENOMEM;
 		goto fail1;
@@ -5082,14 +5082,13 @@ static void dwc2_hcd_free(struct dwc2_hsotg *hsotg)
 	}
 
 	cancel_work_sync(&hsotg->phy_reset_work);
-
-	timer_delete(&hsotg->wkp_timer);
 }
 
 static void dwc2_hcd_release(struct dwc2_hsotg *hsotg)
 {
 	/* Turn off all host-specific interrupts */
 	dwc2_disable_host_interrupts(hsotg);
+	timer_shutdown_sync(&hsotg->wkp_timer);
 
 	dwc2_hcd_free(hsotg);
 }
@@ -5220,7 +5219,7 @@ int dwc2_hcd_init(struct dwc2_hsotg *hsotg)
 	memset(&hsotg->hc_ptr_array[0], 0, sizeof(hsotg->hc_ptr_array));
 
 	for (i = 0; i < num_channels; i++) {
-		channel = kzalloc(sizeof(*channel), GFP_KERNEL);
+		channel = kzalloc_obj(*channel);
 		if (!channel)
 			goto error3;
 		channel->hc_num = i;

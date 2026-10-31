@@ -10,7 +10,6 @@
 #include <linux/mm.h>
 #include <linux/pagemap.h>
 #include <linux/slab.h>
-#include <linux/pagevec.h>
 #include "internal.h"
 
 /*
@@ -226,7 +225,7 @@ ssize_t netfs_perform_write(struct kiocb *iocb, struct iov_iter *iter,
 		 * server would just return a block of zeros or a short read if
 		 * we try to read it.
 		 */
-		if (fpos >= ctx->zero_point) {
+		if (fpos >= netfs_read_zero_point(inode)) {
 			folio_zero_segment(folio, 0, offset);
 			copied = copy_folio_from_iter_atomic(folio, offset, part, iter);
 			if (unlikely(copied == 0))
@@ -278,7 +277,7 @@ ssize_t netfs_perform_write(struct kiocb *iocb, struct iov_iter *iter,
 		 * caching service temporarily because the backing store got
 		 * culled.
 		 */
-		if (netfs_is_cache_enabled(ctx)) {
+		if (netfs_is_cache_maybe_enabled(ctx)) {
 			if (finfo) {
 				netfs_stat(&netfs_n_wh_wstream_conflict);
 				goto flush_content;
@@ -310,7 +309,7 @@ ssize_t netfs_perform_write(struct kiocb *iocb, struct iov_iter *iter,
 				goto mark_uptodate;
 			}
 
-			finfo = kzalloc(sizeof(*finfo), GFP_KERNEL);
+			finfo = kzalloc_obj(*finfo);
 			if (!finfo) {
 				iov_iter_revert(iter, copied);
 				ret = -ENOMEM;
@@ -470,6 +469,7 @@ ssize_t netfs_buffered_write_iter_locked(struct kiocb *iocb, struct iov_iter *fr
 					 struct netfs_group *netfs_group)
 {
 	struct file *file = iocb->ki_filp;
+	struct inode *inode = file_inode(file);
 	ssize_t ret;
 
 	trace_netfs_write_iter(iocb, from);
@@ -481,6 +481,14 @@ ssize_t netfs_buffered_write_iter_locked(struct kiocb *iocb, struct iov_iter *fr
 	ret = file_update_time(file);
 	if (ret)
 		return ret;
+
+	if (iocb->ki_pos > i_size_read(inode)) {
+		ret = netfs_clear_stale_pre_isize(inode, i_size_read(inode),
+						  iocb->ki_pos,
+						  iocb->ki_flags & IOCB_NOWAIT);
+		if (ret)
+			return ret;
+	}
 
 	return netfs_perform_write(iocb, from, netfs_group);
 }
@@ -571,7 +579,7 @@ vm_fault_t netfs_page_mkwrite(struct vm_fault *vmf, struct netfs_group *netfs_gr
 		folio_unlock(folio);
 		err = filemap_fdatawrite_range(mapping,
 					       folio_pos(folio),
-					       folio_pos(folio) + folio_size(folio));
+					       folio_next_pos(folio));
 		switch (err) {
 		case 0:
 			ret = VM_FAULT_RETRY;

@@ -15,16 +15,116 @@
 #include <linux/module.h>
 #include <linux/mtd/spinand.h>
 #include <linux/of.h>
-#include <linux/property.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/spi/spi.h>
 #include <linux/spi/spi-mem.h>
 
+static struct spi_mem_op
+spinand_fill_reset_op(struct spinand_device *spinand)
+{
+	return spinand->op_templates->reset;
+}
+
+static struct spi_mem_op
+spinand_fill_readid_op(struct spinand_device *spinand,
+		       u8 naddr, u8 ndummy, void *buf, unsigned int len)
+{
+	struct spi_mem_op op = spinand->op_templates->readid;
+
+	op.addr.nbytes = naddr;
+	op.dummy.nbytes = ndummy;
+	op.data.buf.in = buf;
+	op.data.nbytes = len;
+
+	return op;
+}
+
+struct spi_mem_op
+spinand_fill_wr_en_op(struct spinand_device *spinand)
+{
+	return spinand->op_templates->wr_en;
+}
+
+static __maybe_unused struct spi_mem_op
+spinand_fill_wr_dis_op(struct spinand_device *spinand)
+{
+	return spinand->op_templates->wr_dis;
+}
+
+struct spi_mem_op
+spinand_fill_set_feature_op(struct spinand_device *spinand, u64 reg, const void *valptr)
+{
+	struct spi_mem_op op = spinand->op_templates->set_feature;
+
+	if (op.cmd.dtr && op.cmd.buswidth == 8)
+		reg |= reg << 8;
+
+	op.addr.val = reg;
+	op.data.buf.out = valptr;
+
+	return op;
+}
+
+struct spi_mem_op
+spinand_fill_get_feature_op(struct spinand_device *spinand, u64 reg, void *valptr)
+{
+	struct spi_mem_op op = spinand->op_templates->get_feature;
+
+	if (op.cmd.dtr && op.cmd.buswidth == 8)
+		reg |= reg << 8;
+
+	op.addr.val = reg;
+	op.data.buf.in = valptr;
+
+	return op;
+}
+
+static struct spi_mem_op
+spinand_fill_blk_erase_op(struct spinand_device *spinand, u64 addr)
+{
+	struct spi_mem_op op = spinand->op_templates->blk_erase;
+
+	op.addr.val = addr;
+
+	return op;
+}
+
+static struct spi_mem_op
+spinand_fill_page_read_op(struct spinand_device *spinand, u64 addr)
+{
+	struct spi_mem_op op = spinand->op_templates->page_read;
+
+	op.addr.val = addr;
+
+	return op;
+}
+
+static struct spi_mem_op
+spinand_fill_page_read_packed_op(struct spinand_device *spinand, u64 addr)
+{
+	struct spi_mem_op op = spinand->op_templates->page_read;
+
+	op.cmd.opcode |= addr >> 16;
+	op.addr.val = addr & 0xFFFF;
+
+	return op;
+}
+
+struct spi_mem_op
+spinand_fill_prog_exec_op(struct spinand_device *spinand, u64 addr)
+{
+	struct spi_mem_op op = spinand->op_templates->prog_exec;
+
+	op.addr.val = addr;
+
+	return op;
+}
+
 int spinand_read_reg_op(struct spinand_device *spinand, u8 reg, u8 *val)
 {
-	struct spi_mem_op op = SPINAND_GET_FEATURE_1S_1S_1S_OP(reg,
-						      spinand->scratchbuf);
+	struct spi_mem_op op = SPINAND_OP(spinand, get_feature,
+					  reg, spinand->scratchbuf);
 	int ret;
 
 	ret = spi_mem_exec_op(spinand->spimem, &op);
@@ -37,11 +137,8 @@ int spinand_read_reg_op(struct spinand_device *spinand, u8 reg, u8 *val)
 
 int spinand_write_reg_op(struct spinand_device *spinand, u8 reg, u8 val)
 {
-	struct spi_mem_op op = SPINAND_SET_FEATURE_1S_1S_1S_OP(reg,
-						      spinand->scratchbuf);
-
-	if (spinand->strict_read_only)
-		return -EROFS;
+	struct spi_mem_op op = SPINAND_OP(spinand, set_feature,
+					  reg, spinand->scratchbuf);
 
 	*spinand->scratchbuf = val;
 	return spi_mem_exec_op(spinand->spimem, &op);
@@ -184,8 +281,26 @@ static int spinand_init_cfg_cache(struct spinand_device *spinand)
 static int spinand_init_quad_enable(struct spinand_device *spinand,
 				    bool enable)
 {
-	return spinand_upd_cfg(spinand, CFG_QUAD_ENABLE,
-			       enable ? CFG_QUAD_ENABLE : 0);
+	struct nand_device *nand = spinand_to_nand(spinand);
+	unsigned int target;
+	int ret;
+
+	/*
+	 * QE is a per-die setting on some devices. Program each target
+	 * individually when enabling or disabling quad I/O mode.
+	 */
+	for (target = 0; target < nand->memorg.ntargets; target++) {
+		ret = spinand_select_target(spinand, target);
+		if (ret)
+			return ret;
+
+		ret = spinand_upd_cfg(spinand, CFG_QUAD_ENABLE,
+				      enable ? CFG_QUAD_ENABLE : 0);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
 }
 
 static int spinand_ecc_enable(struct spinand_device *spinand,
@@ -264,7 +379,7 @@ static int spinand_ondie_ecc_init_ctx(struct nand_device *nand)
 	nand->ecc.ctx.conf.step_size = nand->ecc.requirements.step_size;
 	nand->ecc.ctx.conf.strength = nand->ecc.requirements.strength;
 
-	engine_conf = kzalloc(sizeof(*engine_conf), GFP_KERNEL);
+	engine_conf = kzalloc_obj(*engine_conf);
 	if (!engine_conf)
 		return -ENOMEM;
 
@@ -293,17 +408,6 @@ static int spinand_ondie_ecc_prepare_io_req(struct nand_device *nand,
 		return -EOPNOTSUPP;
 
 	memset(spinand->oobbuf, 0xff, nanddev_per_page_oobsize(nand));
-
-	if (spinand->strict_read_only) {
-		if (!spinand->read_ready)
-			return -EIO;
-
-		/* ECC is pinned on because changing it requires SET FEATURE. */
-		if (!enable)
-			return -EOPNOTSUPP;
-
-		return 0;
-	}
 
 	/* Only enable or disable the engine */
 	return spinand_ecc_enable(spinand, enable);
@@ -368,10 +472,7 @@ static void spinand_ondie_ecc_save_status(struct nand_device *nand, u8 status)
 
 int spinand_write_enable_op(struct spinand_device *spinand)
 {
-	struct spi_mem_op op = SPINAND_WR_EN_1S_0_0_OP;
-
-	if (spinand->strict_read_only)
-		return -EROFS;
+	struct spi_mem_op op = SPINAND_OP(spinand, wr_en);
 
 	return spi_mem_exec_op(spinand->spimem, &op);
 }
@@ -381,7 +482,10 @@ static int spinand_load_page_op(struct spinand_device *spinand,
 {
 	struct nand_device *nand = spinand_to_nand(spinand);
 	unsigned int row = nanddev_pos_to_row(nand, &req->pos);
-	struct spi_mem_op op = SPINAND_PAGE_READ_1S_1S_0_OP(row);
+	bool packed = spinand->flags & SPINAND_ODTR_PACKED_PAGE_READ;
+	struct spi_mem_op op = packed ?
+		SPINAND_OP(spinand, page_read_packed, row) :
+		SPINAND_OP(spinand, page_read, row);
 
 	return spi_mem_exec_op(spinand->spimem, &op);
 }
@@ -415,10 +519,17 @@ static int spinand_read_from_cache_op(struct spinand_device *spinand,
 		}
 	}
 
-	if (req->mode == MTD_OPS_RAW)
-		rdesc = spinand->dirmaps[req->pos.plane].rdesc;
+	rdesc = spinand->dirmaps[req->pos.plane].rdesc;
+
+	if (spinand->op_templates->cont_read_cache && req->continuous)
+		rdesc->info.op_tmpl = &rdesc->info.secondary_op_tmpl;
 	else
-		rdesc = spinand->dirmaps[req->pos.plane].rdesc_ecc;
+		rdesc->info.op_tmpl = &rdesc->info.primary_op_tmpl;
+
+	if (nand_ecc_is_pipelined(nand) && req->mode != MTD_OPS_RAW)
+		rdesc->info.op_tmpl->data.ecc = true;
+	else
+		rdesc->info.op_tmpl->data.ecc = false;
 
 	if (spinand->flags & SPINAND_HAS_READ_PLANE_SELECT_BIT)
 		column |= req->pos.plane << fls(nanddev_page_size(nand));
@@ -507,10 +618,12 @@ static int spinand_write_to_cache_op(struct spinand_device *spinand,
 			       req->ooblen);
 	}
 
-	if (req->mode == MTD_OPS_RAW)
-		wdesc = spinand->dirmaps[req->pos.plane].wdesc;
+	wdesc = spinand->dirmaps[req->pos.plane].wdesc;
+
+	if (nand_ecc_is_pipelined(nand) && req->mode != MTD_OPS_RAW)
+		wdesc->info.op_tmpl->data.ecc = true;
 	else
-		wdesc = spinand->dirmaps[req->pos.plane].wdesc_ecc;
+		wdesc->info.op_tmpl->data.ecc = false;
 
 	if (spinand->flags & SPINAND_HAS_PROG_PLANE_SELECT_BIT)
 		column |= req->pos.plane << fls(nanddev_page_size(nand));
@@ -536,7 +649,7 @@ static int spinand_program_op(struct spinand_device *spinand,
 {
 	struct nand_device *nand = spinand_to_nand(spinand);
 	unsigned int row = nanddev_pos_to_row(nand, &req->pos);
-	struct spi_mem_op op = SPINAND_PROG_EXEC_1S_1S_0_OP(row);
+	struct spi_mem_op op = SPINAND_OP(spinand, prog_exec, row);
 
 	return spi_mem_exec_op(spinand->spimem, &op);
 }
@@ -546,7 +659,7 @@ static int spinand_erase_op(struct spinand_device *spinand,
 {
 	struct nand_device *nand = spinand_to_nand(spinand);
 	unsigned int row = nanddev_pos_to_row(nand, pos);
-	struct spi_mem_op op = SPINAND_BLK_ERASE_1S_1S_0_OP(row);
+	struct spi_mem_op op = SPINAND_OP(spinand, blk_erase, row);
 
 	return spi_mem_exec_op(spinand->spimem, &op);
 }
@@ -566,8 +679,8 @@ static int spinand_erase_op(struct spinand_device *spinand,
 int spinand_wait(struct spinand_device *spinand, unsigned long initial_delay_us,
 		 unsigned long poll_delay_us, u8 *s)
 {
-	struct spi_mem_op op = SPINAND_GET_FEATURE_1S_1S_1S_OP(REG_STATUS,
-							       spinand->scratchbuf);
+	struct spi_mem_op op = SPINAND_OP(spinand, get_feature,
+					  REG_STATUS, spinand->scratchbuf);
 	u8 status;
 	int ret;
 
@@ -600,8 +713,8 @@ out:
 static int spinand_read_id_op(struct spinand_device *spinand, u8 naddr,
 			      u8 ndummy, u8 *buf)
 {
-	struct spi_mem_op op = SPINAND_READID_1S_1S_1S_OP(
-		naddr, ndummy, spinand->scratchbuf, SPINAND_MAX_ID_LEN);
+	struct spi_mem_op op = SPINAND_OP(spinand, readid,
+					  naddr, ndummy, spinand->scratchbuf, SPINAND_MAX_ID_LEN);
 	int ret;
 
 	ret = spi_mem_exec_op(spinand->spimem, &op);
@@ -613,20 +726,8 @@ static int spinand_read_id_op(struct spinand_device *spinand, u8 naddr,
 
 static int spinand_reset_op(struct spinand_device *spinand)
 {
-	struct spi_mem_op op = SPINAND_RESET_1S_0_0_OP;
-	u8 status;
+	struct spi_mem_op op = SPINAND_OP(spinand, reset);
 	int ret;
-
-	/* Resetting an active program or erase operation can corrupt data. */
-	if (spinand->strict_read_only) {
-		ret = spinand_read_status(spinand, &status);
-		if (ret)
-			return ret;
-		if (status & STATUS_BUSY)
-			return -EBUSY;
-		if (status & STATUS_WEL)
-			return -EROFS;
-	}
 
 	ret = spi_mem_exec_op(spinand->spimem, &op);
 	if (ret)
@@ -697,9 +798,6 @@ int spinand_write_page(struct spinand_device *spinand,
 	u8 status;
 	int ret;
 
-	if (spinand->strict_read_only)
-		return -EROFS;
-
 	ret = nand_ecc_prepare_io_req(nand, (struct nand_page_io_req *)req);
 	if (ret)
 		return ret;
@@ -740,7 +838,7 @@ static int spinand_mtd_regular_page_read(struct mtd_info *mtd, loff_t from,
 	bool disable_ecc = false;
 	bool ecc_failed = false;
 	unsigned int retry_mode = 0;
-	int ret;
+	int ret = 0;
 
 	old_stats = mtd->ecc_stats;
 
@@ -760,8 +858,7 @@ read_retry:
 		if (ret < 0 && ret != -EBADMSG)
 			break;
 
-		if (ret == -EBADMSG && spinand->set_read_retry &&
-		    !spinand->strict_read_only) {
+		if (ret == -EBADMSG && spinand->set_read_retry) {
 			if (spinand->read_retries && (++retry_mode <= spinand->read_retries)) {
 				ret = spinand->set_read_retry(spinand, retry_mode);
 				if (ret < 0) {
@@ -822,6 +919,12 @@ static int spinand_mtd_continuous_page_read(struct mtd_info *mtd, loff_t from,
 	 * Each data read must be a multiple of 4-bytes and full pages should be read;
 	 * otherwise, the data output might get out of sequence from one read command
 	 * to another.
+	 *
+	 * Continuous reads never cross LUN boundaries. Some devices don't
+	 * support crossing planes boundaries. Some devices don't even support
+	 * crossing blocks boundaries. The common case being to read through UBI,
+	 * we will very rarely read two consequent blocks or more, so let's only enable
+	 * continuous reads when reading within the same erase block.
 	 */
 	nanddev_io_for_each_block(nand, NAND_PAGE_READ, from, ops, &iter) {
 		ret = spinand_select_target(spinand, iter.req.pos.target);
@@ -878,17 +981,10 @@ static void spinand_cont_read_init(struct spinand_device *spinand)
 {
 	struct nand_device *nand = spinand_to_nand(spinand);
 	enum nand_ecc_engine_type engine_type = nand->ecc.ctx.conf.engine_type;
-
-	/* Continuous-read mode changes feature state when toggled. */
-	if (spinand->strict_read_only)
-		return;
+	struct spi_controller *ctlr = spinand->spimem->spi->controller;
 
 	/* OOBs cannot be retrieved so external/on-host ECC engine won't work */
-	if (spinand->set_cont_read &&
-	    (engine_type == NAND_ECC_ENGINE_TYPE_ON_DIE ||
-	     engine_type == NAND_ECC_ENGINE_TYPE_NONE)) {
-		spinand->cont_read_possible = true;
-
+	if (spinand->set_cont_read) {
 		/*
 		 * Ensure continuous read is disabled on probe.
 		 * Some devices retain this state across soft reset,
@@ -896,6 +992,11 @@ static void spinand_cont_read_init(struct spinand_device *spinand)
 		 * in false positive returns from spinand_isbad().
 		 */
 		spinand_cont_read_enable(spinand, false);
+
+		if ((engine_type == NAND_ECC_ENGINE_TYPE_ON_DIE ||
+		     engine_type == NAND_ECC_ENGINE_TYPE_NONE) &&
+		    !spi_mem_controller_is_capable(ctlr, no_cs_assertion))
+			spinand->cont_read_possible = true;
 	}
 }
 
@@ -915,19 +1016,6 @@ static bool spinand_use_cont_read(struct mtd_info *mtd, loff_t from,
 
 	nanddev_offs_to_pos(nand, from, &start_pos);
 	nanddev_offs_to_pos(nand, from + ops->len - 1, &end_pos);
-
-	/*
-	 * Continuous reads never cross LUN boundaries. Some devices don't
-	 * support crossing planes boundaries. Some devices don't even support
-	 * crossing blocks boundaries. The common case being to read through UBI,
-	 * we will very rarely read two consequent blocks or more, so it is safer
-	 * and easier (can be improved) to only enable continuous reads when
-	 * reading within the same erase block.
-	 */
-	if (start_pos.target != end_pos.target ||
-	    start_pos.plane != end_pos.plane ||
-	    start_pos.eraseblock != end_pos.eraseblock)
-		return false;
 
 	return start_pos.page < end_pos.page;
 }
@@ -1014,23 +1102,18 @@ static bool spinand_isbad(struct nand_device *nand, const struct nand_pos *pos)
 		.ooblen = sizeof(marker),
 		.ooboffs = 0,
 		.oobbuf.in = marker,
-		.mode = spinand->strict_read_only ?
-			MTD_OPS_PLACE_OOB : MTD_OPS_RAW,
+		.mode = MTD_OPS_RAW,
 	};
 	int ret;
 
-	ret = spinand_select_target(spinand, pos->target);
-	if (ret)
-		return true;
+	spinand_select_target(spinand, pos->target);
 
 	ret = spinand_read_page(spinand, &req);
 	if (ret == -EOPNOTSUPP) {
 		/* Retry with ECC in case raw access is not supported */
 		req.mode = MTD_OPS_PLACE_OOB;
-		ret = spinand_read_page(spinand, &req);
+		spinand_read_page(spinand, &req);
 	}
-	if (ret < 0 && spinand->strict_read_only)
-		return true;
 
 	if (marker[0] != 0xff || marker[1] != 0xff)
 		return true;
@@ -1100,9 +1183,6 @@ static int spinand_erase(struct nand_device *nand, const struct nand_pos *pos)
 	struct spinand_device *spinand = nand_to_spinand(nand);
 	u8 status;
 	int ret;
-
-	if (spinand->strict_read_only)
-		return -EROFS;
 
 	ret = spinand_select_target(spinand, pos->target);
 	if (ret)
@@ -1178,6 +1258,7 @@ static struct spi_mem_dirmap_desc *spinand_create_rdesc(
 		 * its spi controller, use regular reading
 		 */
 		spinand->cont_read_possible = false;
+		memset(&info->secondary_op_tmpl, 0, sizeof(info->secondary_op_tmpl));
 
 		info->length = nanddev_page_size(nand) +
 			       nanddev_per_page_oobsize(nand);
@@ -1194,12 +1275,31 @@ static int spinand_create_dirmap(struct spinand_device *spinand,
 	struct nand_device *nand = spinand_to_nand(spinand);
 	struct spi_mem_dirmap_info info = { 0 };
 	struct spi_mem_dirmap_desc *desc;
+	bool enable_ecc = false, secondary_op = false;
+
+	if (nand_ecc_is_pipelined(nand))
+		enable_ecc = true;
+
+	if (spinand->cont_read_possible && spinand->op_templates->cont_read_cache)
+		secondary_op = true;
+
+	/*
+	 * Continuous read implies that only the main data is retrieved, backed
+	 * by an on-die ECC engine. It is not possible to use a pipelind ECC
+	 * engine with continuous read.
+	 */
+	if (enable_ecc && secondary_op) {
+		secondary_op = false;
+		spinand->cont_read_possible = false;
+	}
 
 	/* The plane number is passed in MSB just above the column address */
 	info.offset = plane << fls(nand->memorg.pagesize);
 
+	/* Write descriptor */
 	info.length = nanddev_page_size(nand) + nanddev_per_page_oobsize(nand);
-	info.op_tmpl = *spinand->op_templates->update_cache;
+	info.primary_op_tmpl = *spinand->op_templates->update_cache;
+	info.primary_op_tmpl.data.ecc = enable_ecc;
 	desc = devm_spi_mem_dirmap_create(&spinand->spimem->spi->dev,
 					  spinand->spimem, &info);
 	if (IS_ERR(desc))
@@ -1207,37 +1307,18 @@ static int spinand_create_dirmap(struct spinand_device *spinand,
 
 	spinand->dirmaps[plane].wdesc = desc;
 
-	info.op_tmpl = *spinand->op_templates->read_cache;
+	/* Read descriptor */
+	info.primary_op_tmpl = *spinand->op_templates->read_cache;
+	info.primary_op_tmpl.data.ecc = enable_ecc;
+	if (secondary_op) {
+		info.secondary_op_tmpl = *spinand->op_templates->cont_read_cache;
+		info.secondary_op_tmpl.data.ecc = enable_ecc;
+	}
 	desc = spinand_create_rdesc(spinand, &info);
 	if (IS_ERR(desc))
 		return PTR_ERR(desc);
 
 	spinand->dirmaps[plane].rdesc = desc;
-
-	if (nand->ecc.engine->integration != NAND_ECC_ENGINE_INTEGRATION_PIPELINED) {
-		spinand->dirmaps[plane].wdesc_ecc = spinand->dirmaps[plane].wdesc;
-		spinand->dirmaps[plane].rdesc_ecc = spinand->dirmaps[plane].rdesc;
-
-		return 0;
-	}
-
-	info.length = nanddev_page_size(nand) + nanddev_per_page_oobsize(nand);
-	info.op_tmpl = *spinand->op_templates->update_cache;
-	info.op_tmpl.data.ecc = true;
-	desc = devm_spi_mem_dirmap_create(&spinand->spimem->spi->dev,
-					  spinand->spimem, &info);
-	if (IS_ERR(desc))
-		return PTR_ERR(desc);
-
-	spinand->dirmaps[plane].wdesc_ecc = desc;
-
-	info.op_tmpl = *spinand->op_templates->read_cache;
-	info.op_tmpl.data.ecc = true;
-	desc = spinand_create_rdesc(spinand, &info);
-	if (IS_ERR(desc))
-		return PTR_ERR(desc);
-
-	spinand->dirmaps[plane].rdesc_ecc = desc;
 
 	return 0;
 }
@@ -1263,6 +1344,22 @@ static int spinand_create_dirmaps(struct spinand_device *spinand)
 	return 0;
 }
 
+static int spinand_randomizer_init(struct spinand_device *spinand)
+{
+	struct device_node *np = spinand->spimem->spi->dev.of_node;
+	u32 rand_val;
+	int ret;
+
+	if (!spinand->set_randomizer)
+		return 0;
+
+	ret = of_property_read_u32(np, "nand-randomizer", &rand_val);
+	if (ret)
+		return 0;
+
+	return spinand->set_randomizer(spinand, rand_val);
+}
+
 static const struct nand_ops spinand_ops = {
 	.erase = spinand_erase,
 	.markbad = spinand_markbad,
@@ -1272,10 +1369,13 @@ static const struct nand_ops spinand_ops = {
 static const struct spinand_manufacturer *spinand_manufacturers[] = {
 	&alliancememory_spinand_manufacturer,
 	&ato_spinand_manufacturer,
+	&dosilicon_spinand_manufacturer,
+	&esmt_8c_spinand_manufacturer,
 	&esmt_c8_spinand_manufacturer,
 	&fmsh_spinand_manufacturer,
 	&foresee_spinand_manufacturer,
 	&gigadevice_spinand_manufacturer,
+	&heyangtek_spinand_manufacturer,
 	&macronix_spinand_manufacturer,
 	&micron_spinand_manufacturer,
 	&paragon_spinand_manufacturer,
@@ -1361,6 +1461,11 @@ static void spinand_manufacturer_cleanup(struct spinand_device *spinand)
 		return spinand->manufacturer->ops->cleanup(spinand);
 }
 
+bool spinand_op_is_odtr(const struct spi_mem_op *op)
+{
+	return op->cmd.dtr && op->cmd.buswidth == 8;
+}
+
 static void spinand_init_ssdr_templates(struct spinand_device *spinand)
 {
 	struct spinand_mem_ops *tmpl = &spinand->ssdr_op_templates;
@@ -1378,8 +1483,83 @@ static void spinand_init_ssdr_templates(struct spinand_device *spinand)
 	spinand->bus_iface = SSDR;
 }
 
+static int spinand_support_vendor_ops(struct spinand_device *spinand,
+				      const struct spinand_info *info,
+				      enum spinand_bus_interface iface)
+{
+	int i;
+
+	if (!info->vendor_ops)
+		return 0;
+	/*
+	 * The vendor ops array is only used in order to verify this chip and all its memory
+	 * operations are supported. If we see patterns emerging, we could ideally name these
+	 * operations and define them at the SPI NAND core level instead.
+	 * For now, this only serves as a sanity check.
+	 */
+	for (i = 0; i < info->vendor_ops->nops; i++) {
+		const struct spi_mem_op *op = &info->vendor_ops->ops[i];
+
+		if ((iface == SSDR && spinand_op_is_odtr(op)) ||
+		    (iface == ODTR && !spinand_op_is_odtr(op)))
+			continue;
+
+		if (!spi_mem_supports_op(spinand->spimem, op))
+			return -EOPNOTSUPP;
+	}
+
+	return 0;
+}
+
+static int spinand_init_odtr_instruction_set(struct spinand_device *spinand)
+{
+	struct spinand_mem_ops *tmpl = &spinand->odtr_op_templates;
+
+	tmpl->reset = (struct spi_mem_op)SPINAND_RESET_8D_0_0_OP;
+	if (!spi_mem_supports_op(spinand->spimem, &tmpl->reset))
+		return -EOPNOTSUPP;
+
+	tmpl->readid = (struct spi_mem_op)SPINAND_READID_8D_8D_8D_OP(0, 0, NULL, 0);
+	if (!spi_mem_supports_op(spinand->spimem, &tmpl->readid))
+		return -EOPNOTSUPP;
+
+	tmpl->wr_en = (struct spi_mem_op)SPINAND_WR_EN_8D_0_0_OP;
+	if (!spi_mem_supports_op(spinand->spimem, &tmpl->wr_en))
+		return -EOPNOTSUPP;
+
+	tmpl->wr_dis = (struct spi_mem_op)SPINAND_WR_DIS_8D_0_0_OP;
+	if (!spi_mem_supports_op(spinand->spimem, &tmpl->wr_dis))
+		return -EOPNOTSUPP;
+
+	tmpl->set_feature = (struct spi_mem_op)SPINAND_SET_FEATURE_8D_8D_8D_OP(0, NULL);
+	if (!spi_mem_supports_op(spinand->spimem, &tmpl->set_feature))
+		return -EOPNOTSUPP;
+
+	tmpl->get_feature = (struct spi_mem_op)SPINAND_GET_FEATURE_8D_8D_8D_OP(0, NULL);
+	if (!spi_mem_supports_op(spinand->spimem, &tmpl->get_feature))
+		return -EOPNOTSUPP;
+
+	tmpl->blk_erase = (struct spi_mem_op)SPINAND_BLK_ERASE_8D_8D_0_OP(0);
+	if (!spi_mem_supports_op(spinand->spimem, &tmpl->blk_erase))
+		return -EOPNOTSUPP;
+
+	if (spinand->flags & SPINAND_ODTR_PACKED_PAGE_READ)
+		tmpl->page_read = (struct spi_mem_op)SPINAND_PAGE_READ_PACKED_8D_8D_0_OP(0);
+	else
+		tmpl->page_read = (struct spi_mem_op)SPINAND_PAGE_READ_8D_8D_0_OP(0);
+	if (!spi_mem_supports_op(spinand->spimem, &tmpl->page_read)) {
+		return -EOPNOTSUPP;
+	}
+
+	tmpl->prog_exec = (struct spi_mem_op)SPINAND_PROG_EXEC_8D_8D_0_OP(0);
+	if (!spi_mem_supports_op(spinand->spimem, &tmpl->prog_exec))
+		return -EOPNOTSUPP;
+
+	return 0;
+}
+
 static const struct spi_mem_op *
-spinand_select_op_variant(struct spinand_device *spinand,
+spinand_select_op_variant(struct spinand_device *spinand, enum spinand_bus_interface iface,
 			  const struct spinand_op_variants *variants)
 {
 	struct nand_device *nand = spinand_to_nand(spinand);
@@ -1392,6 +1572,10 @@ spinand_select_op_variant(struct spinand_device *spinand,
 		u64 op_duration_ns = 0;
 		unsigned int nbytes;
 		int ret;
+
+		if ((iface == SSDR && spinand_op_is_odtr(&op)) ||
+		    (iface == ODTR && !spinand_op_is_odtr(&op)))
+			continue;
 
 		nbytes = nanddev_per_page_oobsize(nand) +
 			 nanddev_page_size(nand);
@@ -1444,6 +1628,7 @@ int spinand_match_and_init(struct spinand_device *spinand,
 	u8 *id = spinand->id.data;
 	struct nand_device *nand = spinand_to_nand(spinand);
 	unsigned int i;
+	int ret;
 
 	for (i = 0; i < table_size; i++) {
 		const struct spinand_info *info = &table[i];
@@ -1462,39 +1647,102 @@ int spinand_match_and_init(struct spinand_device *spinand,
 		spinand->id.len = 1 + table[i].devid.len;
 		spinand->select_target = table[i].select_target;
 		spinand->configure_chip = table[i].configure_chip;
-		spinand->prepare_read_only = table[i].prepare_read_only;
-		spinand->check_read_only = table[i].check_read_only;
 		spinand->set_cont_read = table[i].set_cont_read;
 		spinand->fact_otp = &table[i].fact_otp;
 		spinand->user_otp = &table[i].user_otp;
 		spinand->read_retries = table[i].read_retries;
 		spinand->set_read_retry = table[i].set_read_retry;
+		spinand->set_randomizer = table[i].set_randomizer;
 
-		op = spinand_select_op_variant(spinand,
+		/* I/O variants selection with single-spi SDR commands */
+
+		op = spinand_select_op_variant(spinand, SSDR,
 					       info->op_variants.read_cache);
 		if (!op)
-			return -ENOTSUPP;
+			return -EOPNOTSUPP;
 
 		spinand->ssdr_op_templates.read_cache = op;
 
-		op = spinand_select_op_variant(spinand,
+		op = spinand_select_op_variant(spinand, SSDR,
 					       info->op_variants.write_cache);
 		if (!op)
-			return -ENOTSUPP;
+			return -EOPNOTSUPP;
 
 		spinand->ssdr_op_templates.write_cache = op;
 
-		op = spinand_select_op_variant(spinand,
+		op = spinand_select_op_variant(spinand, SSDR,
 					       info->op_variants.update_cache);
 		if (!op)
-			return -ENOTSUPP;
+			return -EOPNOTSUPP;
 
 		spinand->ssdr_op_templates.update_cache = op;
+
+		ret = spinand_support_vendor_ops(spinand, info, SSDR);
+		if (ret)
+			return ret;
+
+		if (info->op_variants.cont_read_cache) {
+			op = spinand_select_op_variant(spinand, SSDR,
+						       info->op_variants.cont_read_cache);
+			if (op) {
+				const struct spi_mem_op *read_op;
+
+				read_op = spinand->ssdr_op_templates.read_cache;
+
+				/*
+				 * Sometimes the fastest continuous read variant may not
+				 * be supported. In this case, prefer to use the fastest
+				 * read from cache variant and disable continuous reads.
+				 */
+				if (read_op->cmd.buswidth > op->cmd.buswidth ||
+				    (read_op->cmd.dtr && !op->cmd.dtr) ||
+				    read_op->addr.buswidth > op->addr.buswidth ||
+				    (read_op->addr.dtr && !op->addr.dtr) ||
+				    read_op->data.buswidth > op->data.buswidth ||
+				    (read_op->data.dtr && !op->data.dtr))
+					spinand->cont_read_possible = false;
+				else
+					spinand->ssdr_op_templates.cont_read_cache = op;
+			} else {
+				spinand->cont_read_possible = false;
+			}
+		}
+
+		/* I/O variants selection with octo-spi DDR commands (optional) */
+
+		ret = spinand_init_odtr_instruction_set(spinand);
+		if (ret)
+			return 0;
+
+		ret = spinand_support_vendor_ops(spinand, info, ODTR);
+		if (ret)
+			return 0;
+
+		op = spinand_select_op_variant(spinand, ODTR,
+					       info->op_variants.read_cache);
+		spinand->odtr_op_templates.read_cache = op;
+
+		op = spinand_select_op_variant(spinand, ODTR,
+					       info->op_variants.write_cache);
+		spinand->odtr_op_templates.write_cache = op;
+
+		op = spinand_select_op_variant(spinand, ODTR,
+					       info->op_variants.update_cache);
+		spinand->odtr_op_templates.update_cache = op;
+
+		if (info->op_variants.cont_read_cache) {
+			op = spinand_select_op_variant(spinand, ODTR,
+						       info->op_variants.cont_read_cache);
+			if (op)
+				spinand->odtr_op_templates.cont_read_cache = op;
+			else
+				spinand->cont_read_possible = false;
+		}
 
 		return 0;
 	}
 
-	return -ENOTSUPP;
+	return -EOPNOTSUPP;
 }
 
 static int spinand_detect(struct spinand_device *spinand)
@@ -1532,19 +1780,40 @@ static int spinand_detect(struct spinand_device *spinand)
 
 static int spinand_configure_chip(struct spinand_device *spinand)
 {
-	bool quad_enable = false;
-	int ret = 0;
+	bool odtr = false, quad_enable = false;
+	int ret;
 
+	if (spinand->odtr_op_templates.read_cache &&
+	    spinand->odtr_op_templates.write_cache &&
+	    spinand->odtr_op_templates.update_cache)
+		odtr = true;
+
+	if (odtr) {
+		if (!spinand->configure_chip)
+			goto try_ssdr;
+
+		/* ODTR bus interface configuration happens here */
+		ret = spinand->configure_chip(spinand, ODTR);
+		if (ret) {
+			spinand->odtr_op_templates.read_cache = NULL;
+			spinand->odtr_op_templates.write_cache = NULL;
+			spinand->odtr_op_templates.update_cache = NULL;
+			goto try_ssdr;
+		}
+
+		spinand->op_templates = &spinand->odtr_op_templates;
+		spinand->bus_iface = ODTR;
+
+		return 0;
+	}
+
+try_ssdr:
 	if (spinand->flags & SPINAND_HAS_QE_BIT) {
 		if (spinand->ssdr_op_templates.read_cache->data.buswidth == 4 ||
 		    spinand->ssdr_op_templates.write_cache->data.buswidth == 4 ||
 		    spinand->ssdr_op_templates.update_cache->data.buswidth == 4)
 			quad_enable = true;
-	}
 
-	/* Bit 0 is not a QE bit on chips that do not advertise one. */
-	if (!spinand->strict_read_only ||
-	    (spinand->flags & SPINAND_HAS_QE_BIT)) {
 		ret = spinand_init_quad_enable(spinand, quad_enable);
 		if (ret)
 			return ret;
@@ -1556,29 +1825,6 @@ static int spinand_configure_chip(struct spinand_device *spinand)
 			return ret;
 	}
 
-	return ret;
-}
-
-static int spinand_validate_readonly_cfg(struct spinand_device *spinand)
-{
-	struct device *dev = &spinand->spimem->spi->dev;
-	struct nand_device *nand = spinand_to_nand(spinand);
-	unsigned int target;
-	u8 cfg;
-
-	for (target = 0; target < nand->memorg.ntargets; target++) {
-		cfg = spinand->cfg_cache[target];
-		if (cfg & CFG_OTP_ENABLE) {
-			dev_err(dev, "target %u is still in OTP mode\n", target);
-			return -EROFS;
-		}
-
-		if (!(cfg & CFG_ECC_ENABLE)) {
-			dev_err(dev, "target %u has on-die ECC disabled\n", target);
-			return -EROFS;
-		}
-	}
-
 	return 0;
 }
 
@@ -1587,16 +1833,6 @@ static int spinand_init_flash(struct spinand_device *spinand)
 	struct device *dev = &spinand->spimem->spi->dev;
 	struct nand_device *nand = spinand_to_nand(spinand);
 	int ret, i;
-
-	if (spinand->strict_read_only && !spinand->check_read_only) {
-		dev_err(dev, "chip does not support strict read-only probing\n");
-		return -EOPNOTSUPP;
-	}
-	if (spinand->strict_read_only && spinand->prepare_read_only) {
-		ret = spinand->prepare_read_only(spinand);
-		if (ret)
-			return ret;
-	}
 
 	ret = spinand_read_cfg(spinand);
 	if (ret)
@@ -1617,18 +1853,6 @@ static int spinand_init_flash(struct spinand_device *spinand)
 	ret = spinand_configure_chip(spinand);
 	if (ret)
 		goto manuf_cleanup;
-
-	if (spinand->strict_read_only) {
-		ret = spinand_validate_readonly_cfg(spinand);
-		if (ret)
-			goto manuf_cleanup;
-
-		ret = spinand->check_read_only(spinand);
-		if (ret)
-			goto manuf_cleanup;
-
-		return 0;
-	}
 
 	/* After power up, all blocks are locked, so unlock them here. */
 	for (i = 0; i < nand->memorg.ntargets; i++) {
@@ -1654,29 +1878,41 @@ static void spinand_mtd_resume(struct mtd_info *mtd)
 	struct spinand_device *spinand = mtd_to_spinand(mtd);
 	int ret;
 
-	mutex_lock(&spinand->lock);
-	if (spinand->strict_read_only)
-		spinand->read_ready = false;
-
 	ret = spinand_reset_op(spinand);
 	if (ret)
-		goto out;
+		return;
 
 	ret = spinand_init_flash(spinand);
 	if (ret)
-		goto out;
+		return;
 
-	if (spinand->strict_read_only) {
-		spinand->read_ready = true;
-		goto out;
+	spinand_ecc_enable(spinand, false);
+}
+
+static int spinand_mtd_suspend(struct mtd_info *mtd)
+{
+	struct spinand_device *spinand = mtd_to_spinand(mtd);
+	int ret;
+
+	/*
+	 * Return to SSDR interface in the suspend path to make sure the
+	 * reset operation is correctly processed upon resume.
+	 *
+	 * Note: Once back in SSDR mode, every operation but the page helpers
+	 * (dirmap based I/O accessors) will work. Page accesses would require
+	 * destroying and recreating the dirmaps twice to work, which would be
+	 * impacting for no reason, as this is just a transitional state.
+	 */
+	if (spinand->bus_iface == ODTR) {
+		ret = spinand->configure_chip(spinand, SSDR);
+		if (ret)
+			return ret;
+
+		spinand->op_templates = &spinand->ssdr_op_templates;
+		spinand->bus_iface = SSDR;
 	}
 
-	ret = spinand_ecc_enable(spinand, false);
-
-out:
-	if (ret)
-		dev_err(&mtd->dev, "failed to restore chip state: %d\n", ret);
-	mutex_unlock(&spinand->lock);
+	return 0;
 }
 
 static int spinand_init(struct spinand_device *spinand)
@@ -1726,34 +1962,23 @@ static int spinand_init(struct spinand_device *spinand)
 	if (ret)
 		goto err_manuf_cleanup;
 
-	if (spinand->strict_read_only)
-		mtd->flags &= ~MTD_WRITEABLE;
-
 	/* SPI-NAND default ECC engine is on-die */
 	nand->ecc.defaults.engine_type = NAND_ECC_ENGINE_TYPE_ON_DIE;
 	nand->ecc.ondie_engine = &spinand_ondie_ecc_engine;
 
-	if (!spinand->strict_read_only) {
-		ret = spinand_ecc_enable(spinand, false);
-		if (ret)
-			goto err_cleanup_nanddev;
-	}
-
+	spinand_ecc_enable(spinand, false);
 	ret = nanddev_ecc_engine_init(nand);
 	if (ret)
 		goto err_cleanup_nanddev;
-	if (spinand->strict_read_only &&
-	    nand->ecc.engine != nand->ecc.ondie_engine) {
-		dev_err(dev, "strict read-only mode requires on-die ECC\n");
-		ret = -EOPNOTSUPP;
-		goto err_cleanup_ecc_engine;
-	}
 
 	/*
 	 * Continuous read can only be enabled with an on-die ECC engine, so the
 	 * ECC initialization must have happened previously.
 	 */
 	spinand_cont_read_init(spinand);
+	ret = spinand_randomizer_init(spinand);
+	if (ret)
+		goto err_cleanup_nanddev;
 
 	mtd->_read_oob = spinand_mtd_read;
 	mtd->_write_oob = spinand_mtd_write;
@@ -1762,20 +1987,25 @@ static int spinand_init(struct spinand_device *spinand)
 	mtd->_block_isreserved = spinand_mtd_block_isreserved;
 	mtd->_erase = spinand_mtd_erase;
 	mtd->_max_bad_blocks = nanddev_mtd_max_bad_blocks;
+	mtd->_suspend = spinand_mtd_suspend;
 	mtd->_resume = spinand_mtd_resume;
 
-	if (!spinand->strict_read_only &&
-	    (spinand_user_otp_size(spinand) || spinand_fact_otp_size(spinand))) {
+	if (spinand_user_otp_size(spinand) || spinand_fact_otp_size(spinand)) {
 		ret = spinand_set_mtd_otp_ops(spinand);
 		if (ret)
 			goto err_cleanup_ecc_engine;
 	}
 
-	if (nand->ecc.engine) {
-		ret = mtd_ooblayout_count_freebytes(mtd);
-		if (ret < 0)
-			goto err_cleanup_ecc_engine;
+	if (!nand->ecc.engine) {
+		if (spinand->eccinfo.ooblayout)
+			mtd_set_ooblayout(mtd, spinand->eccinfo.ooblayout);
+		else
+			mtd_set_ooblayout(mtd, &spinand_noecc_ooblayout);
 	}
+
+	ret = mtd_ooblayout_count_freebytes(mtd);
+	if (ret < 0)
+		goto err_cleanup_ecc_engine;
 
 	mtd->oobavail = ret;
 
@@ -1784,9 +2014,6 @@ static int spinand_init(struct spinand_device *spinand)
 	mtd->ecc_step_size = nanddev_get_ecc_conf(nand)->step_size;
 	mtd->bitflip_threshold = DIV_ROUND_UP(mtd->ecc_strength * 3, 4);
 
-	/* The on-die ECC is generated again at every program of a page. */
-	mtd->program_once = nand->ecc.engine == nand->ecc.ondie_engine;
-
 	ret = spinand_create_dirmaps(spinand);
 	if (ret) {
 		dev_err(dev,
@@ -1794,9 +2021,6 @@ static int spinand_init(struct spinand_device *spinand)
 			ret);
 		goto err_cleanup_ecc_engine;
 	}
-
-	if (spinand->strict_read_only)
-		spinand->read_ready = true;
 
 	return 0;
 
@@ -1828,12 +2052,8 @@ static void spinand_cleanup(struct spinand_device *spinand)
 
 static int spinand_probe(struct spi_mem *mem)
 {
-	static const char * const ofpart_types[] = { "ofpart", NULL };
 	struct spinand_device *spinand;
-	struct device_node *partitions;
 	struct mtd_info *mtd;
-	bool fixed_partitions = false;
-	bool partitions_only;
 	int ret;
 
 	spinand = devm_kzalloc(&mem->spi->dev, sizeof(*spinand),
@@ -1842,10 +2062,6 @@ static int spinand_probe(struct spi_mem *mem)
 		return -ENOMEM;
 
 	spinand->spimem = mem;
-	spinand->strict_read_only =
-		device_property_read_bool(&mem->spi->dev, "read-only");
-	partitions_only = spinand->strict_read_only ||
-		device_property_read_bool(&mem->spi->dev, "partitions-only");
 	spi_mem_set_drvdata(mem, spinand);
 	spinand_set_of_node(spinand, mem->spi->dev.of_node);
 	mutex_init(&spinand->lock);
@@ -1856,24 +2072,7 @@ static int spinand_probe(struct spi_mem *mem)
 	if (ret)
 		return ret;
 
-	if (partitions_only) {
-		partitions = of_get_child_by_name(mem->spi->dev.of_node,
-						  "partitions");
-		if (partitions)
-			fixed_partitions = of_device_is_compatible(partitions,
-								   "fixed-partitions");
-		of_node_put(partitions);
-		if (!fixed_partitions) {
-			dev_err(&mem->spi->dev,
-				"partitions-only mode requires fixed partitions\n");
-			ret = -EINVAL;
-			goto err_spinand_cleanup;
-		}
-
-		ret = mtd_device_parse_register_partitions_only(mtd, ofpart_types, NULL);
-	} else {
-		ret = mtd_device_register(mtd, NULL, 0);
-	}
+	ret = mtd_device_register(mtd, NULL, 0);
 	if (ret)
 		goto err_spinand_cleanup;
 

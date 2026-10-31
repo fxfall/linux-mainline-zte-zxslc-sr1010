@@ -98,10 +98,6 @@
 	status = "okay";
 };
 
-&amix {
-	status = "okay";
-};
-
 &asrc0 {
 	status = "okay";
 };
@@ -126,8 +122,6 @@
 	xceiver-supply = <&reg_can2_supply>;
 	status = "okay";
 };
-
-/* TODO: GPU */
 
 /* Apalis I2C1 */
 &i2c2 {
@@ -249,7 +243,10 @@
 	status = "okay";
 };
 
-/* TODO: Apalis BKL1_PWM */
+/* Apalis BKL1_PWM */
+&pwm_lvds1 {
+	status = "okay";
+};
 
 /* Apalis DAP1 */
 &sai1 {

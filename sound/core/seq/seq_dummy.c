@@ -72,7 +72,7 @@ struct snd_seq_dummy_port {
 	int connect;
 };
 
-static int my_client = -1;
+static int my_client __ro_after_init = -1;
 
 /*
  * event input callback - just redirect events to subscribers
@@ -118,7 +118,7 @@ create_port(int idx, int type)
 	struct snd_seq_port_callback pcb;
 	struct snd_seq_dummy_port *rec;
 
-	rec = kzalloc(sizeof(*rec), GFP_KERNEL);
+	rec = kzalloc_obj(*rec);
 	if (!rec)
 		return NULL;
 

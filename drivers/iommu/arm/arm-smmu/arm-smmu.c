@@ -865,11 +865,8 @@ static int arm_smmu_init_domain_context(struct arm_smmu_domain *smmu_domain,
 		ret = devm_request_irq(smmu->dev, irq, context_fault, IRQF_SHARED,
 				       "arm-smmu-context-fault", smmu_domain);
 
-	if (ret < 0) {
-		dev_err(smmu->dev, "failed to request context IRQ %d (%u)\n",
-			cfg->irptndx, irq);
+	if (ret < 0)
 		cfg->irptndx = ARM_SMMU_INVALID_IRPTNDX;
-	}
 
 	mutex_unlock(&smmu_domain->init_mutex);
 
@@ -927,7 +924,7 @@ static struct iommu_domain *arm_smmu_domain_alloc_paging(struct device *dev)
 	 * We can't really do anything meaningful until we've added a
 	 * master.
 	 */
-	smmu_domain = kzalloc(sizeof(*smmu_domain), GFP_KERNEL);
+	smmu_domain = kzalloc_obj(*smmu_domain);
 	if (!smmu_domain)
 		return NULL;
 
@@ -1165,7 +1162,8 @@ static void arm_smmu_master_install_s2crs(struct arm_smmu_master_cfg *cfg,
 	}
 }
 
-static int arm_smmu_attach_dev(struct iommu_domain *domain, struct device *dev)
+static int arm_smmu_attach_dev(struct iommu_domain *domain, struct device *dev,
+			       struct iommu_domain *old)
 {
 	struct arm_smmu_domain *smmu_domain = to_smmu_domain(domain);
 	struct iommu_fwspec *fwspec = dev_iommu_fwspec_get(dev);
@@ -1234,7 +1232,8 @@ static int arm_smmu_attach_dev_type(struct device *dev,
 }
 
 static int arm_smmu_attach_dev_identity(struct iommu_domain *domain,
-					struct device *dev)
+					struct device *dev,
+					struct iommu_domain *old)
 {
 	return arm_smmu_attach_dev_type(dev, S2CR_TYPE_BYPASS);
 }
@@ -1249,7 +1248,8 @@ static struct iommu_domain arm_smmu_identity_domain = {
 };
 
 static int arm_smmu_attach_dev_blocked(struct iommu_domain *domain,
-				       struct device *dev)
+				       struct device *dev,
+				       struct iommu_domain *old)
 {
 	return arm_smmu_attach_dev_type(dev, S2CR_TYPE_FAULT);
 }
@@ -2216,9 +2216,7 @@ static int arm_smmu_device_probe(struct platform_device *pdev)
 		err = devm_request_irq(dev, irq, global_fault, IRQF_SHARED,
 				       "arm-smmu global fault", smmu);
 		if (err)
-			return dev_err_probe(dev, err,
-					"failed to request global IRQ %d (%u)\n",
-					i, irq);
+			return err;
 	}
 
 	platform_set_drvdata(pdev, smmu);

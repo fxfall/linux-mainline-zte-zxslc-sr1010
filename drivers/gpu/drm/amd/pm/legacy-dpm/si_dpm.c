@@ -2554,18 +2554,13 @@ static int si_enable_power_containment(struct amdgpu_device *adev,
 		if (enable) {
 			if (!si_should_disable_uvd_powertune(adev, amdgpu_new_state)) {
 				smc_result = amdgpu_si_send_msg_to_smc(adev, PPSMC_TDPClampingActive);
-				if (smc_result != PPSMC_Result_OK) {
+				if (smc_result != PPSMC_Result_OK)
 					ret = -EINVAL;
-					ni_pi->pc_enabled = false;
-				} else {
-					ni_pi->pc_enabled = true;
-				}
 			}
 		} else {
 			smc_result = amdgpu_si_send_msg_to_smc(adev, PPSMC_TDPClampingInactive);
 			if (smc_result != PPSMC_Result_OK)
 				ret = -EINVAL;
-			ni_pi->pc_enabled = false;
 		}
 	}
 
@@ -2591,7 +2586,7 @@ static int si_initialize_smc_dte_tables(struct amdgpu_device *adev)
 	if (dte_data->k <= 0)
 		return -EINVAL;
 
-	dte_tables = kzalloc(sizeof(Smc_SIslands_DTE_Configuration), GFP_KERNEL);
+	dte_tables = kzalloc_obj(Smc_SIslands_DTE_Configuration);
 	if (dte_tables == NULL) {
 		si_pi->enable_dte = false;
 		return -ENOMEM;
@@ -2772,7 +2767,7 @@ static int si_initialize_smc_cac_tables(struct amdgpu_device *adev)
 	if (ni_pi->enable_cac == false)
 		return 0;
 
-	cac_tables = kzalloc(sizeof(PP_SIslands_CacConfig), GFP_KERNEL);
+	cac_tables = kzalloc_obj(PP_SIslands_CacConfig);
 	if (!cac_tables)
 		return -ENOMEM;
 
@@ -2969,7 +2964,7 @@ static int si_init_smc_spll_table(struct amdgpu_device *adev)
 	if (si_pi->spll_table_start == 0)
 		return -EINVAL;
 
-	spll_table = kzalloc(sizeof(SMC_SISLANDS_SPLL_DIV_TABLE), GFP_KERNEL);
+	spll_table = kzalloc_obj(SMC_SISLANDS_SPLL_DIV_TABLE);
 	if (spll_table == NULL)
 		return -ENOMEM;
 
@@ -3893,16 +3888,21 @@ static void si_notify_hardware_vpu_recovery_event(struct amdgpu_device *adev)
 }
 #endif
 
-#if 0
-static int si_notify_hw_of_powersource(struct amdgpu_device *adev, bool ac_power)
+static void si_notify_hw_of_powersource(void *handle)
 {
-	if (ac_power)
-		return (amdgpu_si_send_msg_to_smc(adev, PPSMC_MSG_RunningOnAC) == PPSMC_Result_OK) ?
-			0 : -EINVAL;
+	struct amdgpu_device *adev = (struct amdgpu_device *)handle;
 
-	return 0;
+	/*
+	 * Check if the platform already manages the AC/DC switch via dedicated GPIO.
+	 * Otherwise SMU automatically notices DC, but needs to be notified of AC.
+	 */
+	if (adev->pm.ac_power &&
+	    (adev->pm.dpm.platform_caps & ATOM_PP_PLATFORM_CAP_HARDWAREDC))
+		amdgpu_si_send_msg_to_smc(adev, PPSMC_MSG_RunningOnAC);
+
+	/* Recompute clocks with updated max_limits. */
+	amdgpu_legacy_dpm_compute_clocks(adev);
 }
-#endif
 
 static PPSMC_Result si_send_msg_to_smc_with_parameter(struct amdgpu_device *adev,
 						      PPSMC_Msg msg, u32 parameter)
@@ -5263,7 +5263,8 @@ static int si_init_smc_table(struct amdgpu_device *adev)
 		break;
 	}
 
-	if (adev->pm.dpm.platform_caps & ATOM_PP_PLATFORM_CAP_HARDWAREDC)
+	if ((adev->flags & AMD_IS_MOBILITY) &&
+	    (adev->pm.dpm.platform_caps & ATOM_PP_PLATFORM_CAP_HARDWAREDC))
 		table->systemFlags |= PPSMC_SYSTEMFLAG_GPIO_DC;
 
 	if (adev->pm.dpm.platform_caps & ATOM_PP_PLATFORM_CAP_REGULATOR_HOT) {
@@ -6065,7 +6066,7 @@ static int si_initialize_mc_reg_table(struct amdgpu_device *adev)
 	u8 module_index = rv770_get_memory_module_index(adev);
 	int ret;
 
-	table = kzalloc(sizeof(struct atom_mc_reg_table), GFP_KERNEL);
+	table = kzalloc_obj(struct atom_mc_reg_table);
 	if (!table)
 		return -ENOMEM;
 
@@ -7063,13 +7064,20 @@ static void si_set_vce_clock(struct amdgpu_device *adev,
 	if ((old_rps->evclk != new_rps->evclk) ||
 	    (old_rps->ecclk != new_rps->ecclk)) {
 		/* Turn the clocks on when encoding, off otherwise */
+		dev_dbg(adev->dev, "set VCE clocks: %u, %u\n", new_rps->evclk, new_rps->ecclk);
+
 		if (new_rps->evclk || new_rps->ecclk) {
-			/* Place holder for future VCE1.0 porting to amdgpu
-			vce_v1_0_enable_mgcg(adev, false, false);*/
+			amdgpu_asic_set_vce_clocks(adev, new_rps->evclk, new_rps->ecclk);
+			amdgpu_device_ip_set_clockgating_state(
+				adev, AMD_IP_BLOCK_TYPE_VCE, AMD_CG_STATE_UNGATE);
+			amdgpu_device_ip_set_powergating_state(
+				adev, AMD_IP_BLOCK_TYPE_VCE, AMD_PG_STATE_UNGATE);
 		} else {
-			/* Place holder for future VCE1.0 porting to amdgpu
-			vce_v1_0_enable_mgcg(adev, true, false);
-			amdgpu_asic_set_vce_clocks(adev, new_rps->evclk, new_rps->ecclk);*/
+			amdgpu_device_ip_set_powergating_state(
+				adev, AMD_IP_BLOCK_TYPE_VCE, AMD_PG_STATE_GATE);
+			amdgpu_device_ip_set_clockgating_state(
+				adev, AMD_IP_BLOCK_TYPE_VCE, AMD_CG_STATE_GATE);
+			amdgpu_asic_set_vce_clocks(adev, 0, 0);
 		}
 	}
 }
@@ -7230,6 +7238,19 @@ static void si_parse_pplib_non_clock_info(struct amdgpu_device *adev,
 		adev->pm.dpm.uvd_ps = rps;
 }
 
+static void si_update_limits(struct amdgpu_clock_and_voltage_limits *limits,
+			     struct rv7xx_pl *pl)
+{
+	if (pl->sclk > limits->sclk)
+		limits->sclk = pl->sclk;
+	if (pl->mclk > limits->mclk)
+		limits->mclk = pl->mclk;
+	if (pl->vddc > limits->vddc)
+		limits->vddc = pl->vddc;
+	if (pl->vddci > limits->vddci)
+		limits->vddci = pl->vddci;
+}
+
 static void si_parse_pplib_clock_info(struct amdgpu_device *adev,
 				      struct amdgpu_ps *rps, int index,
 				      union pplib_clock_info *clock_info)
@@ -7297,13 +7318,19 @@ static void si_parse_pplib_clock_info(struct amdgpu_device *adev,
 		si_pi->mvdd_bootup_value = mvdd;
 	}
 
+	/*
+	 * Update maximum allowed clock limits.
+	 * VBIOS can contain conflicting values between:
+	 * - the maximum allowed clocks and voltages on AC or DC
+	 * - the clocks and voltages in power states on AC or DC
+	 *
+	 * Assume that the AC limits are the maximum of all power states,
+	 * and the DC limits are the maximum of battery power states.
+	 */
+	si_update_limits(&adev->pm.dpm.dyn_state.max_clock_voltage_on_ac, pl);
 	if ((rps->class & ATOM_PPLIB_CLASSIFICATION_UI_MASK) ==
-	    ATOM_PPLIB_CLASSIFICATION_UI_PERFORMANCE) {
-		adev->pm.dpm.dyn_state.max_clock_voltage_on_ac.sclk = pl->sclk;
-		adev->pm.dpm.dyn_state.max_clock_voltage_on_ac.mclk = pl->mclk;
-		adev->pm.dpm.dyn_state.max_clock_voltage_on_ac.vddc = pl->vddc;
-		adev->pm.dpm.dyn_state.max_clock_voltage_on_ac.vddci = pl->vddci;
-	}
+		 ATOM_PPLIB_CLASSIFICATION_UI_BATTERY)
+		si_update_limits(&adev->pm.dpm.dyn_state.max_clock_voltage_on_dc, pl);
 }
 
 union pplib_power_state {
@@ -7345,9 +7372,8 @@ static int si_parse_power_table(struct amdgpu_device *adev)
 		(mode_info->atom_context->bios + data_offset +
 		 le16_to_cpu(power_info->pplib.usNonClockInfoArrayOffset));
 
-	adev->pm.dpm.ps = kcalloc(state_array->ucNumEntries,
-				  sizeof(struct amdgpu_ps),
-				  GFP_KERNEL);
+	adev->pm.dpm.ps = kzalloc_objs(struct amdgpu_ps,
+				       state_array->ucNumEntries);
 	if (!adev->pm.dpm.ps)
 		return -ENOMEM;
 	power_state_offset = (u8 *)state_array->states;
@@ -7357,7 +7383,7 @@ static int si_parse_power_table(struct amdgpu_device *adev)
 		non_clock_array_index = power_state->v2.nonClockInfoIndex;
 		non_clock_info = (struct _ATOM_PPLIB_NONCLOCK_INFO *)
 			&non_clock_info_array->nonClockInfo[non_clock_array_index];
-		ps = kzalloc(sizeof(struct  si_ps), GFP_KERNEL);
+		ps = kzalloc_obj(struct si_ps);
 		if (ps == NULL)
 			return -ENOMEM;
 		adev->pm.dpm.ps[i].ps_priv = ps;
@@ -7410,7 +7436,7 @@ static int si_dpm_init(struct amdgpu_device *adev)
 	struct atom_clock_dividers dividers;
 	int ret;
 
-	si_pi = kzalloc(sizeof(struct si_power_info), GFP_KERNEL);
+	si_pi = kzalloc_obj(struct si_power_info);
 	if (si_pi == NULL)
 		return -ENOMEM;
 	adev->pm.dpm.priv = si_pi;
@@ -7447,9 +7473,7 @@ static int si_dpm_init(struct amdgpu_device *adev)
 		return ret;
 
 	adev->pm.dpm.dyn_state.vddc_dependency_on_dispclk.entries =
-		kcalloc(4,
-			sizeof(struct amdgpu_clock_voltage_dependency_entry),
-			GFP_KERNEL);
+		kzalloc_objs(struct amdgpu_clock_voltage_dependency_entry, 4);
 	if (!adev->pm.dpm.dyn_state.vddc_dependency_on_dispclk.entries)
 		return -ENOMEM;
 
@@ -7521,8 +7545,6 @@ static int si_dpm_init(struct amdgpu_device *adev)
 	pi->pasi = CYPRESS_HASI_DFLT;
 	pi->vrc = SISLANDS_VRC_DFLT;
 
-	pi->gfx_clock_gating = true;
-
 	eg_pi->sclk_deep_sleep = true;
 	si_pi->sclk_deep_sleep_above_low = false;
 
@@ -7533,7 +7555,6 @@ static int si_dpm_init(struct amdgpu_device *adev)
 
 	eg_pi->dynamic_ac_timing = true;
 
-	eg_pi->light_sleep = true;
 #if defined(CONFIG_ACPI)
 	eg_pi->pcie_performance_request =
 		amdgpu_acpi_is_pcie_performance_request_supported(adev);
@@ -7594,6 +7615,7 @@ static void si_dpm_debugfs_print_current_performance_level(void *handle,
 	} else {
 		pl = &ps->performance_levels[current_index];
 		seq_printf(m, "uvd    vclk: %d dclk: %d\n", rps->vclk, rps->dclk);
+		seq_printf(m, "vce    evclk: %d ecclk: %d\n", rps->evclk, rps->ecclk);
 		seq_printf(m, "power level %d    sclk: %u mclk: %u vddc: %u vddci: %u pcie gen: %u\n",
 			   current_index, pl->sclk, pl->mclk, pl->vddc, pl->vddci, pl->pcie_gen + 1);
 	}
@@ -7671,7 +7693,7 @@ static int si_dpm_process_interrupt(struct amdgpu_device *adev,
 		break;
 	}
 
-	if (queue_thermal)
+	if (queue_thermal && amdgpu_dpm)
 		schedule_work(&adev->pm.dpm.thermal.work);
 
 	return 0;
@@ -7812,13 +7834,12 @@ static int si_dpm_sw_init(struct amdgpu_ip_block *ip_block)
 	adev->pm.dpm.current_ps = adev->pm.dpm.requested_ps = adev->pm.dpm.boot_ps;
 	if (amdgpu_dpm == 1)
 		amdgpu_pm_print_power_states(adev);
-	DRM_INFO("amdgpu: dpm initialized\n");
-
+	drm_info(adev_to_drm(adev), "si dpm initialized\n");
 	return 0;
 
 dpm_failed:
 	si_dpm_fini(adev);
-	DRM_ERROR("amdgpu: dpm initialization failed\n");
+	drm_err(adev_to_drm(adev), "dpm initialization failed\n");
 	return ret;
 }
 
@@ -8148,6 +8169,7 @@ static const struct amd_pm_funcs si_dpm_funcs = {
 	.get_vce_clock_state = amdgpu_get_vce_clock_state,
 	.read_sensor = &si_dpm_read_sensor,
 	.pm_compute_clocks = amdgpu_legacy_dpm_compute_clocks,
+	.notify_ac_dc = si_notify_hw_of_powersource,
 };
 
 static const struct amdgpu_irq_src_funcs si_dpm_irq_funcs = {

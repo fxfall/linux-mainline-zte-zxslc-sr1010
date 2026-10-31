@@ -381,6 +381,7 @@ void dwc3_otg_update(struct dwc3 *dwc, bool ignore_idstatus)
 		dwc3_otgregs_init(dwc);
 		dwc3_otg_host_init(dwc);
 		spin_unlock_irqrestore(&dwc->lock, flags);
+		dwc3_pre_set_role(dwc, USB_ROLE_HOST);
 		ret = dwc3_host_init(dwc);
 		if (ret) {
 			dev_err(dwc->dev, "failed to initialize host\n");
@@ -406,6 +407,7 @@ void dwc3_otg_update(struct dwc3 *dwc, bool ignore_idstatus)
 			otg_set_vbus(dwc->usb2_phy->otg, false);
 		if (dwc->usb2_generic_phy[0])
 			phy_set_mode(dwc->usb2_generic_phy[0], PHY_MODE_USB_DEVICE);
+		dwc3_pre_set_role(dwc, USB_ROLE_DEVICE);
 		ret = dwc3_gadget_init(dwc);
 		if (ret)
 			dev_err(dwc->dev, "failed to initialize peripheral\n");
@@ -433,10 +435,12 @@ static int dwc3_drd_notifier(struct notifier_block *nb,
 			     unsigned long event, void *ptr)
 {
 	struct dwc3 *dwc = container_of(nb, struct dwc3, edev_nb);
+	u32 mode = event ? DWC3_GCTL_PRTCAP_HOST : DWC3_GCTL_PRTCAP_DEVICE;
+	enum usb_role role = mode == DWC3_GCTL_PRTCAP_HOST ?
+				     USB_ROLE_HOST : USB_ROLE_DEVICE;
 
-	dwc3_set_mode(dwc, event ?
-		      DWC3_GCTL_PRTCAP_HOST :
-		      DWC3_GCTL_PRTCAP_DEVICE);
+	dwc3_pre_set_role(dwc, role);
+	dwc3_set_mode(dwc, mode);
 
 	return NOTIFY_DONE;
 }
@@ -515,6 +519,7 @@ static int dwc3_setup_role_switch(struct dwc3 *dwc)
 	dwc3_role_switch.set = dwc3_usb_role_switch_set;
 	dwc3_role_switch.get = dwc3_usb_role_switch_get;
 	dwc3_role_switch.driver_data = dwc;
+	dwc3_role_switch.allow_userspace_control = true;
 	dwc->role_sw = usb_role_switch_register(dwc->dev, &dwc3_role_switch);
 	if (IS_ERR(dwc->role_sw))
 		return PTR_ERR(dwc->role_sw);

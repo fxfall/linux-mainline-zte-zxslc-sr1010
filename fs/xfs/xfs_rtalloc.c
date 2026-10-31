@@ -3,7 +3,7 @@
  * Copyright (c) 2000-2005 Silicon Graphics, Inc.
  * All Rights Reserved.
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -112,6 +112,10 @@ xfs_rtcopy_summary(
 			error = xfs_rtget_summary(oargs, log, bbno, &sum);
 			if (error)
 				goto out;
+			if (XFS_IS_CORRUPT(oargs->mp, sum < 0)) {
+				error = -EFSCORRUPTED;
+				goto out;
+			}
 			if (sum == 0)
 				continue;
 			error = xfs_rtmodify_summary(oargs, log, bbno, -sum);
@@ -120,7 +124,6 @@ xfs_rtcopy_summary(
 			error = xfs_rtmodify_summary(nargs, log, bbno, sum);
 			if (error)
 				goto out;
-			ASSERT(sum > 0);
 		}
 	}
 	error = 0;
@@ -734,7 +737,7 @@ xfs_rtginode_ensure(
 	xfs_trans_cancel(tp);
 
 	if (error != -ENOENT)
-		return 0;
+		return error;
 	return xfs_rtginode_create(rtg, type, true);
 }
 
@@ -887,8 +890,7 @@ xfs_growfs_rt_sb_fields(
 
 static int
 xfs_growfs_rt_zoned(
-	struct xfs_rtgroup	*rtg,
-	xfs_rfsblock_t		nrblocks)
+	struct xfs_rtgroup	*rtg)
 {
 	struct xfs_mount	*mp = rtg_mount(rtg);
 	struct xfs_mount	*nmp;
@@ -900,7 +902,8 @@ xfs_growfs_rt_zoned(
 	 * Calculate new sb and mount fields for this round.  Also ensure the
 	 * rtg_extents value is uptodate as the rtbitmap code relies on it.
 	 */
-	nmp = xfs_growfs_rt_alloc_fake_mount(mp, nrblocks,
+	nmp = xfs_growfs_rt_alloc_fake_mount(mp,
+			xfs_rtgs_to_rfsbs(mp, rtg_rgno(rtg) + 1),
 			mp->m_sb.sb_rextsize);
 	if (!nmp)
 		return -ENOMEM;
@@ -930,6 +933,14 @@ xfs_growfs_rt_zoned(
 	mp->m_features |= XFS_FEAT_REALTIME;
 	xfs_rtrmapbt_compute_maxlevels(mp);
 	xfs_rtrefcountbt_compute_maxlevels(mp);
+
+	/*
+	 * Finally add the newly added zone to the freelist and add the space
+	 * to the available counter.  The order is important here: only add
+	 * the available space after the zones, as available space guarantees
+	 * that zones to back it are available.
+	 */
+	xfs_zone_mark_free(rtg);
 	xfs_zoned_add_available(mp, freed_rtx);
 out_free:
 	kfree(nmp);
@@ -1047,6 +1058,15 @@ xfs_growfs_rt_bmblock(
 	 */
 	xfs_trans_resv_calc(mp, &mp->m_resv);
 
+	/*
+	 * Sync sb counters now to reflect the updated values. Lazy counters are
+	 * not always updated and in order to avoid inconsistencies between
+	 * frextents and rtextents, it is better to sync the counters.
+	 */
+
+	if (xfs_has_lazysbcount(mp))
+		xfs_log_sb(args.tp);
+
 	error = xfs_trans_commit(args.tp);
 	if (error)
 		goto out_free;
@@ -1079,17 +1099,27 @@ xfs_last_rtgroup_extents(
 }
 
 /*
- * Calculate the last rbmblock currently used.
+ * This will return the bitmap block number (indexed at 0) that will be
+ * extended/modified. There are 2 cases here:
+ * 1. The size of the rtg is such that it is a multiple of
+ *    xfs_rtbitmap_rtx_per_rbmblock() i.e, an integral number of bitmap blocks
+ *    are completely filled up. In this case, we should return
+ *    1 + (the last used bitmap block number).
+ * 2. The size of the rtg is not an multiple of xfs_rtbitmap_rtx_per_rbmblock().
+ *    Here we will return the block number of last used block number. In this
+ *    case, we will modify the last used bitmap block to extend the size of the
+ *    rtgroup.
  *
  * This also deals with the case where there were no rtextents before.
  */
 static xfs_fileoff_t
-xfs_last_rt_bmblock(
+xfs_last_rt_bmblock_to_extend(
 	struct xfs_rtgroup	*rtg)
 {
 	struct xfs_mount	*mp = rtg_mount(rtg);
 	xfs_rgnumber_t		rgno = rtg_rgno(rtg);
 	xfs_fileoff_t		bmbno = 0;
+	unsigned int		mod = 0;
 
 	ASSERT(!mp->m_sb.sb_rgcount || rgno >= mp->m_sb.sb_rgcount - 1);
 
@@ -1097,9 +1127,16 @@ xfs_last_rt_bmblock(
 		xfs_rtxnum_t	nrext = xfs_last_rtgroup_extents(mp);
 
 		/* Also fill up the previous block if not entirely full. */
-		bmbno = xfs_rtbitmap_blockcount_len(mp, nrext);
-		if (xfs_rtx_to_rbmword(mp, nrext) != 0)
-			bmbno--;
+		/* We are doing a -1 to convert it to a 0 based index */
+		bmbno = xfs_rtbitmap_blockcount_len(mp, nrext) - 1;
+		div_u64_rem(nrext, xfs_rtbitmap_rtx_per_rbmblock(mp), &mod);
+		/*
+		 * mod = 0 means that all the current blocks are full. So
+		 * return the next block number to be used for the rtgroup
+		 * growth.
+		 */
+		if (mod == 0)
+			bmbno++;
 	}
 
 	return bmbno;
@@ -1189,7 +1226,7 @@ xfs_growfs_rtg(
 	}
 
 	if (xfs_has_zoned(mp)) {
-		error = xfs_growfs_rt_zoned(rtg, nrblocks);
+		error = xfs_growfs_rt_zoned(rtg);
 		goto out_rele;
 	}
 
@@ -1204,7 +1241,8 @@ xfs_growfs_rtg(
 			goto out_rele;
 	}
 
-	for (bmbno = xfs_last_rt_bmblock(rtg); bmbno < bmblocks; bmbno++) {
+	for (bmbno = xfs_last_rt_bmblock_to_extend(rtg); bmbno < bmblocks;
+			bmbno++) {
 		error = xfs_growfs_rt_bmblock(rtg, nrblocks, rextsize, bmbno);
 		if (error)
 			goto out_error;
@@ -1265,7 +1303,7 @@ xfs_growfs_check_rtgeom(
 		uint32_t	rem;
 
 		if (rextsize != 1)
-			return -EINVAL;
+			goto out_inval;
 		div_u64_rem(nmp->m_sb.sb_rblocks, gblocks, &rem);
 		if (rem) {
 			xfs_warn(mp,
@@ -1326,7 +1364,7 @@ xfs_grow_last_rtg(
 		return true;
 	if (mp->m_sb.sb_rgcount == 0)
 		return false;
-	return xfs_rtgroup_extents(mp, mp->m_sb.sb_rgcount - 1) <=
+	return xfs_rtgroup_extents(mp, mp->m_sb.sb_rgcount - 1) <
 			mp->m_sb.sb_rgextents;
 }
 

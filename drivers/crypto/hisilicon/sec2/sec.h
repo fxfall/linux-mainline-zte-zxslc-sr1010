@@ -181,9 +181,6 @@ struct sec_ctx {
 	const struct sec_req_op *req_op;
 	struct hisi_qp **qps;
 
-	/* Half queues for encipher, and half for decipher */
-	u32 hlf_q_num;
-
 	/* Current cyclic index to select a queue for encipher */
 	atomic_t enc_qcyclic;
 
@@ -285,7 +282,5 @@ enum sec_cap_table_type {
 
 void sec_destroy_qps(struct hisi_qp **qps, int qp_num);
 struct hisi_qp **sec_create_qps(void);
-int sec_register_to_crypto(struct hisi_qm *qm);
-void sec_unregister_from_crypto(struct hisi_qm *qm);
 u64 sec_get_alg_bitmap(struct hisi_qm *qm, u32 high, u32 low);
 #endif

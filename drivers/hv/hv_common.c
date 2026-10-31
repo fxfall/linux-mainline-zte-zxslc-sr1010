@@ -317,9 +317,9 @@ int __init hv_common_init(void)
 	int i;
 	union hv_hypervisor_version_info version;
 
-	/* Get information about the Hyper-V host version */
+	/* Get information about the Microsoft Hypervisor version */
 	if (!hv_get_hypervisor_version(&version))
-		pr_info("Hyper-V: Host Build %d.%d.%d.%d-%d-%d\n",
+		pr_info("Hyper-V: Hypervisor Build %d.%d.%d.%d-%d-%d\n",
 			version.major_version, version.minor_version,
 			version.build_number, version.service_number,
 			version.service_pack, version.service_branch);
@@ -489,7 +489,7 @@ int hv_common_cpu_init(unsigned int cpu)
 	 * online and then taken offline
 	 */
 	if (!*inputarg) {
-		mem = kmalloc(pgcount * HV_HYP_PAGE_SIZE, flags);
+		mem = kmalloc_array(pgcount, HV_HYP_PAGE_SIZE, flags);
 		if (!mem)
 			return -ENOMEM;
 
@@ -718,6 +718,27 @@ u64 __weak hv_tdx_hypercall(u64 control, u64 param1, u64 param2)
 }
 EXPORT_SYMBOL_GPL(hv_tdx_hypercall);
 
+void __weak hv_enable_coco_interrupt(unsigned int cpu, unsigned int vector, bool set)
+{
+}
+EXPORT_SYMBOL_GPL(hv_enable_coco_interrupt);
+
+void __weak hv_para_set_sint_proxy(bool enable)
+{
+}
+EXPORT_SYMBOL_GPL(hv_para_set_sint_proxy);
+
+u64 __weak hv_para_get_synic_register(unsigned int reg)
+{
+	return ~0ULL;
+}
+EXPORT_SYMBOL_GPL(hv_para_get_synic_register);
+
+void __weak hv_para_set_synic_register(unsigned int reg, u64 val)
+{
+}
+EXPORT_SYMBOL_GPL(hv_para_set_synic_register);
+
 void hv_identify_partition_type(void)
 {
 	/* Assume guest role */
@@ -766,12 +787,15 @@ static const struct hv_status_info hv_status_infos[] = {
 	_STATUS_INFO(HV_STATUS_INVALID_HYPERCALL_INPUT,		-EINVAL),
 	_STATUS_INFO(HV_STATUS_INVALID_ALIGNMENT,		-EIO),
 	_STATUS_INFO(HV_STATUS_INVALID_PARAMETER,		-EINVAL),
-	_STATUS_INFO(HV_STATUS_ACCESS_DENIED,			-EIO),
+	_STATUS_INFO(HV_STATUS_ACCESS_DENIED,			-EACCES),
 	_STATUS_INFO(HV_STATUS_INVALID_PARTITION_STATE,		-EIO),
-	_STATUS_INFO(HV_STATUS_OPERATION_DENIED,		-EIO),
-	_STATUS_INFO(HV_STATUS_UNKNOWN_PROPERTY,		-EIO),
-	_STATUS_INFO(HV_STATUS_PROPERTY_VALUE_OUT_OF_RANGE,	-EIO),
+	_STATUS_INFO(HV_STATUS_OPERATION_DENIED,		-EACCES),
+	_STATUS_INFO(HV_STATUS_UNKNOWN_PROPERTY,		-EINVAL),
+	_STATUS_INFO(HV_STATUS_PROPERTY_VALUE_OUT_OF_RANGE,	-EINVAL),
 	_STATUS_INFO(HV_STATUS_INSUFFICIENT_MEMORY,		-ENOMEM),
+	_STATUS_INFO(HV_STATUS_INSUFFICIENT_CONTIGUOUS_MEMORY,	-ENOMEM),
+	_STATUS_INFO(HV_STATUS_INSUFFICIENT_ROOT_MEMORY,	-ENOMEM),
+	_STATUS_INFO(HV_STATUS_INSUFFICIENT_CONTIGUOUS_ROOT_MEMORY,	-ENOMEM),
 	_STATUS_INFO(HV_STATUS_INVALID_PARTITION_ID,		-EINVAL),
 	_STATUS_INFO(HV_STATUS_INVALID_VP_INDEX,		-EINVAL),
 	_STATUS_INFO(HV_STATUS_NOT_FOUND,			-EIO),
@@ -781,11 +805,9 @@ static const struct hv_status_info hv_status_infos[] = {
 	_STATUS_INFO(HV_STATUS_NOT_ACKNOWLEDGED,		-EIO),
 	_STATUS_INFO(HV_STATUS_INVALID_VP_STATE,		-EIO),
 	_STATUS_INFO(HV_STATUS_NO_RESOURCES,			-EIO),
-	_STATUS_INFO(HV_STATUS_PROCESSOR_FEATURE_NOT_SUPPORTED,	-EIO),
+	_STATUS_INFO(HV_STATUS_PROCESSOR_FEATURE_NOT_SUPPORTED,	-EOPNOTSUPP),
 	_STATUS_INFO(HV_STATUS_INVALID_LP_INDEX,		-EINVAL),
 	_STATUS_INFO(HV_STATUS_INVALID_REGISTER_VALUE,		-EINVAL),
-	_STATUS_INFO(HV_STATUS_INVALID_LP_INDEX,		-EIO),
-	_STATUS_INFO(HV_STATUS_INVALID_REGISTER_VALUE,		-EIO),
 	_STATUS_INFO(HV_STATUS_OPERATION_FAILED,		-EIO),
 	_STATUS_INFO(HV_STATUS_TIME_OUT,			-EIO),
 	_STATUS_INFO(HV_STATUS_CALL_PENDING,			-EIO),

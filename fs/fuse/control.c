@@ -1,12 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
   FUSE: Filesystem in Userspace
   Copyright (C) 2001-2008  Miklos Szeredi <miklos@szeredi.hu>
-
-  This program can be distributed under the terms of the GNU GPL.
-  See the file COPYING.
 */
 
 #include "fuse_i.h"
+#include "dev.h"
 
 #include <linux/init.h>
 #include <linux/module.h>
@@ -37,9 +36,7 @@ static ssize_t fuse_conn_abort_write(struct file *file, const char __user *buf,
 {
 	struct fuse_conn *fc = fuse_ctl_file_conn_get(file);
 	if (fc) {
-		if (fc->abort_err)
-			fc->aborted = true;
-		fuse_abort_conn(fc);
+		fuse_chan_abort(fc->chan, fc->abort_err);
 		fuse_conn_put(fc);
 	}
 	return count;
@@ -57,7 +54,7 @@ static ssize_t fuse_conn_waiting_read(struct file *file, char __user *buf,
 		if (!fc)
 			return 0;
 
-		value = atomic_read(&fc->num_waiting);
+		value = fuse_chan_num_waiting(fc->chan);
 		file->private_data = (void *)value;
 		fuse_conn_put(fc);
 	}
@@ -111,7 +108,7 @@ static ssize_t fuse_conn_max_background_read(struct file *file,
 	if (!fc)
 		return 0;
 
-	val = READ_ONCE(fc->max_background);
+	val = fuse_chan_max_background(fc->chan);
 	fuse_conn_put(fc);
 
 	return fuse_conn_limit_read(file, buf, len, ppos, val);
@@ -129,12 +126,7 @@ static ssize_t fuse_conn_max_background_write(struct file *file,
 	if (ret > 0) {
 		struct fuse_conn *fc = fuse_ctl_file_conn_get(file);
 		if (fc) {
-			spin_lock(&fc->bg_lock);
-			fc->max_background = val;
-			fc->blocked = fc->num_background >= fc->max_background;
-			if (!fc->blocked)
-				wake_up(&fc->blocked_waitq);
-			spin_unlock(&fc->bg_lock);
+			fuse_chan_max_background_set(fc->chan, val);
 			fuse_conn_put(fc);
 		}
 	}
@@ -236,8 +228,14 @@ static struct dentry *fuse_ctl_add_dentry(struct dentry *parent,
 		inc_nlink(inode);
 	}
 	inode->i_private = fc;
-	d_add(dentry, inode);
+	d_make_persistent(dentry, inode);
+	dput(dentry);
 
+	/*
+	 * We are returning a borrowed reference here - it's only good while
+	 * fuse_mutex is held.  Actually it's d_make_persistent() return
+	 * value...
+	 */
 	return dentry;
 }
 
@@ -290,18 +288,13 @@ static void remove_one(struct dentry *dentry)
  */
 void fuse_ctl_remove_conn(struct fuse_conn *fc)
 {
-	struct dentry *dentry;
 	char name[32];
 
 	if (!fuse_control_sb || fc->no_control)
 		return;
 
 	sprintf(name, "%u", fc->dev);
-	dentry = lookup_noperm_positive_unlocked(&QSTR(name), fuse_control_sb->s_root);
-	if (!IS_ERR(dentry)) {
-		simple_recursive_removal(dentry, remove_one);
-		dput(dentry);	// paired with lookup_noperm_positive_unlocked()
-	}
+	simple_remove_by_name(fuse_control_sb->s_root, name, remove_one);
 }
 
 static int fuse_ctl_fill_super(struct super_block *sb, struct fs_context *fsc)
@@ -351,7 +344,7 @@ static void fuse_ctl_kill_sb(struct super_block *sb)
 	fuse_control_sb = NULL;
 	mutex_unlock(&fuse_mutex);
 
-	kill_litter_super(sb);
+	kill_anon_super(sb);
 }
 
 static struct file_system_type fuse_ctl_fs_type = {

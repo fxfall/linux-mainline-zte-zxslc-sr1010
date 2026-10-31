@@ -86,14 +86,23 @@ struct file_security_struct {
 	u32 pseqno; /* Policy seqno at the time of file open */
 };
 
+struct backing_file_security_layer {
+	struct path path; /* this layer's real path */
+	u32 mounter_sid; /* SID of the mounter that opened it */
+	u32 fd_sid; /* SID of its open file description */
+};
+
 struct backing_file_security_struct {
-	u32 uf_sid; /* associated user file fsec->sid */
+	u32 uf_sid; /* top-level user file fsec->sid */
+	u32 layer_count; /* number of intermediate backing files */
+	struct backing_file_security_layer *layers;
 };
 
 struct superblock_security_struct {
 	u32 sid; /* SID of file system superblock */
 	u32 def_sid; /* default SID for labeling */
 	u32 mntpoint_sid; /* SECURITY_FS_USE_MNTPOINT context for files */
+	u32 creator_sid; /* SID of privileged process */
 	unsigned short behavior; /* labeling behavior */
 	unsigned short flags; /* which mount options were specified */
 	struct mutex lock;
@@ -171,6 +180,8 @@ struct pkey_security_struct {
 
 struct bpf_security_struct {
 	u32 sid; /* SID of bpf obj creator */
+	u32 perms; /* permissions for allowed bpf token commands */
+	u32 grantor_sid; /* SID of token grantor */
 };
 
 struct perf_event_security_struct {

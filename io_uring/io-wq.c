@@ -17,7 +17,9 @@
 #include <linux/task_work.h>
 #include <linux/audit.h>
 #include <linux/mmu_context.h>
+#include <linux/sched/sysctl.h>
 #include <uapi/linux/io_uring.h>
+#include <linux/kcov.h>
 
 #include "io-wq.h"
 #include "slist.h"
@@ -210,9 +212,12 @@ static void io_worker_cancel_cb(struct io_worker *worker)
 	struct io_wq *wq = worker->wq;
 
 	atomic_dec(&acct->nr_running);
-	raw_spin_lock(&acct->workers_lock);
-	acct->nr_workers--;
-	raw_spin_unlock(&acct->workers_lock);
+	/* create_worker_cb() has not reserved a worker slot yet. */
+	if (worker->create_work.func != create_worker_cb) {
+		raw_spin_lock(&acct->workers_lock);
+		acct->nr_workers--;
+		raw_spin_unlock(&acct->workers_lock);
+	}
 	io_worker_ref_put(wq);
 	clear_bit_unlock(0, &worker->create_state);
 	io_worker_release(worker);
@@ -601,7 +606,6 @@ static void io_worker_handle_work(struct io_wq_acct *acct,
 	struct io_wq *wq = worker->wq;
 
 	do {
-		bool do_kill = test_bit(IO_WQ_BIT_EXIT, &wq->state);
 		struct io_wq_work *work;
 
 		/*
@@ -637,18 +641,23 @@ static void io_worker_handle_work(struct io_wq_acct *acct,
 
 		/* handle a whole dependent link */
 		do {
+			bool do_kill = test_bit(IO_WQ_BIT_EXIT, &wq->state);
 			struct io_wq_work *next_hashed, *linked;
 			unsigned int work_flags = atomic_read(&work->flags);
 			unsigned int hash = __io_wq_is_hashed(work_flags)
 				? __io_get_work_hash(work_flags)
 				: -1U;
+			struct io_kiocb *req;
 
 			next_hashed = wq_next_work(work);
 
 			if (do_kill &&
 			    (work_flags & IO_WQ_WORK_UNBOUND))
 				atomic_or(IO_WQ_WORK_CANCEL, &work->flags);
+			req = container_of(work, struct io_kiocb, work);
+			kcov_remote_start_common(req->ctx->kcov_handle);
 			io_wq_submit_work(work);
+			kcov_remote_stop();
 			io_assign_current_work(worker, NULL);
 
 			linked = io_wq_free_work(work);
@@ -810,11 +819,12 @@ static inline bool io_should_retry_thread(struct io_worker *worker, long err)
 	 */
 	if (fatal_signal_pending(current))
 		return false;
-	if (worker->init_retries++ >= WORKER_INIT_LIMIT)
-		return false;
 
+	worker->init_retries++;
 	switch (err) {
 	case -EAGAIN:
+		return worker->init_retries <= WORKER_INIT_LIMIT;
+	/* Analogous to a fork() syscall, always retry on a restartable error */
 	case -ERESTARTSYS:
 	case -ERESTARTNOINTR:
 	case -ERESTARTNOHAND:
@@ -895,7 +905,7 @@ static bool create_io_worker(struct io_wq *wq, struct io_wq_acct *acct)
 
 	__set_current_state(TASK_RUNNING);
 
-	worker = kzalloc(sizeof(*worker), GFP_KERNEL);
+	worker = kzalloc_obj(*worker);
 	if (!worker) {
 fail:
 		atomic_dec(&acct->nr_running);
@@ -951,16 +961,13 @@ static bool io_acct_for_each_worker(struct io_wq_acct *acct,
 	return ret;
 }
 
-static bool io_wq_for_each_worker(struct io_wq *wq,
+static void io_wq_for_each_worker(struct io_wq *wq,
 				  bool (*func)(struct io_worker *, void *),
 				  void *data)
 {
-	for (int i = 0; i < IO_WQ_ACCT_NR; i++) {
+	for (int i = 0; i < IO_WQ_ACCT_NR; i++)
 		if (io_acct_for_each_worker(&wq->acct[i], func, data))
-			return true;
-	}
-
-	return false;
+			break;
 }
 
 static bool io_wq_worker_wake(struct io_worker *worker, void *data)
@@ -1257,7 +1264,7 @@ struct io_wq *io_wq_create(unsigned bounded, struct io_wq_data *data)
 	if (WARN_ON_ONCE(!bounded))
 		return ERR_PTR(-EINVAL);
 
-	wq = kzalloc(sizeof(struct io_wq), GFP_KERNEL);
+	wq = kzalloc_obj(struct io_wq);
 	if (!wq)
 		return ERR_PTR(-ENOMEM);
 
@@ -1339,6 +1346,8 @@ static void io_wq_cancel_tw_create(struct io_wq *wq)
 
 static void io_wq_exit_workers(struct io_wq *wq)
 {
+	unsigned long timeout, warn_timeout;
+
 	if (!wq->task)
 		return;
 
@@ -1348,7 +1357,26 @@ static void io_wq_exit_workers(struct io_wq *wq)
 	io_wq_for_each_worker(wq, io_wq_worker_wake, NULL);
 	rcu_read_unlock();
 	io_worker_ref_put(wq);
-	wait_for_completion(&wq->worker_done);
+
+	/*
+	 * Shut up hung task complaint, see for example
+	 *
+	 * https://lore.kernel.org/all/696fc9e7.a70a0220.111c58.0006.GAE@google.com/
+	 *
+	 * where completely overloading the system with tons of long running
+	 * io-wq items can easily trigger the hung task timeout. Only sleep
+	 * uninterruptibly for half that time, and warn if we exceeded end
+	 * up waiting more than IO_URING_EXIT_WAIT_MAX.
+	 */
+	timeout = sysctl_hung_task_timeout_secs * HZ / 2;
+	if (!timeout)
+		timeout = MAX_SCHEDULE_TIMEOUT;
+	warn_timeout = jiffies + IO_URING_EXIT_WAIT_MAX;
+	do {
+		if (wait_for_completion_timeout(&wq->worker_done, timeout))
+			break;
+		WARN_ON_ONCE(time_after(jiffies, warn_timeout));
+	} while (1);
 
 	spin_lock_irq(&wq->hash->wait.lock);
 	list_del_init(&wq->wait.entry);

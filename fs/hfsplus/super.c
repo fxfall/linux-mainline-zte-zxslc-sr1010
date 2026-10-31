@@ -71,7 +71,7 @@ struct inode *hfsplus_iget(struct super_block *sb, unsigned long ino)
 	inode = iget_locked(sb, ino);
 	if (!inode)
 		return ERR_PTR(-ENOMEM);
-	if (!(inode->i_state & I_NEW))
+	if (!(inode_state_read_once(inode) & I_NEW))
 		return inode;
 
 	atomic_set(&HFSPLUS_I(inode)->opencnt, 0);
@@ -91,8 +91,6 @@ struct inode *hfsplus_iget(struct super_block *sb, unsigned long ino)
 	HFSPLUS_I(inode)->fs_blocks = 0;
 	HFSPLUS_I(inode)->userflags = 0;
 	HFSPLUS_I(inode)->subfolders = 0;
-	INIT_LIST_HEAD(&HFSPLUS_I(inode)->open_dir_list);
-	spin_lock_init(&HFSPLUS_I(inode)->open_dir_lock);
 	HFSPLUS_I(inode)->phys_size = 0;
 
 	if (inode->i_ino >= HFSPLUS_FIRSTUSER_CNID ||
@@ -153,10 +151,13 @@ static int hfsplus_system_write_inode(struct inode *inode)
 	}
 	hfsplus_inode_write_fork(inode, fork);
 	if (tree) {
+		mutex_lock_nested(&tree->tree_lock,
+				  hfsplus_btree_lock_class(tree));
 		int err = hfs_btree_write(tree);
+		mutex_unlock(&tree->tree_lock);
 
 		if (err) {
-			pr_err("b-tree write err: %d, ino %lu\n",
+			pr_err("b-tree write err: %d, ino %llu\n",
 			       err, inode->i_ino);
 			return err;
 		}
@@ -169,7 +170,7 @@ static int hfsplus_write_inode(struct inode *inode,
 {
 	int err;
 
-	hfs_dbg("ino %lu\n", inode->i_ino);
+	hfs_dbg("ino %llu\n", inode->i_ino);
 
 	err = hfsplus_ext_write_extent(inode);
 	if (err)
@@ -184,7 +185,7 @@ static int hfsplus_write_inode(struct inode *inode,
 
 static void hfsplus_evict_inode(struct inode *inode)
 {
-	hfs_dbg("ino %lu\n", inode->i_ino);
+	hfs_dbg("ino %llu\n", inode->i_ino);
 	truncate_inode_pages_final(&inode->i_data);
 	clear_inode(inode);
 	if (HFSPLUS_IS_RSRC(inode)) {
@@ -311,7 +312,7 @@ void hfsplus_mark_mdb_dirty(struct super_block *sb)
 	spin_lock(&sbi->work_lock);
 	if (!sbi->work_queued) {
 		delay = msecs_to_jiffies(dirty_writeback_interval * 10);
-		queue_delayed_work(system_long_wq, &sbi->sync_work, delay);
+		queue_delayed_work(system_dfl_long_wq, &sbi->sync_work, delay);
 		sbi->work_queued = 1;
 	}
 	spin_unlock(&sbi->work_lock);
@@ -424,12 +425,35 @@ void hfsplus_prepare_volume_header_for_commit(struct hfsplus_vh *vhdr)
 	vhdr->attributes |= cpu_to_be32(HFSPLUS_VOL_INCNSTNT);
 }
 
+static inline int hfsplus_get_hidden_dir_entry(struct super_block *sb,
+					       const struct qstr *str,
+					       hfsplus_cat_entry *entry)
+{
+	struct hfs_find_data fd;
+	int err;
+
+	err = hfs_find_init(HFSPLUS_SB(sb)->cat_tree, &fd);
+	if (unlikely(err))
+		return err;
+
+	err = hfsplus_cat_build_key(sb, fd.search_key, HFSPLUS_ROOT_CNID, str);
+	if (unlikely(err))
+		goto free_fd;
+
+	err = hfsplus_brec_read_cat(&fd, entry);
+	if (err)
+		err = -ENOENT;
+
+free_fd:
+	hfs_find_exit(&fd);
+	return err;
+}
+
 static int hfsplus_fill_super(struct super_block *sb, struct fs_context *fc)
 {
 	struct hfsplus_vh *vhdr;
 	struct hfsplus_sb_info *sbi = HFSPLUS_SB(sb);
 	hfsplus_cat_entry entry;
-	struct hfs_find_data fd;
 	struct inode *root, *inode;
 	struct qstr str;
 	struct nls_table *nls;
@@ -565,16 +589,14 @@ static int hfsplus_fill_super(struct super_block *sb, struct fs_context *fc)
 
 	str.len = sizeof(HFSP_HIDDENDIR_NAME) - 1;
 	str.name = HFSP_HIDDENDIR_NAME;
-	err = hfs_find_init(sbi->cat_tree, &fd);
-	if (err)
+	err = hfsplus_get_hidden_dir_entry(sb, &str, &entry);
+	if (err == -ENOENT) {
+		/*
+		 * Hidden directory is absent or it cannot be read.
+		 */
+	} else if (unlikely(err)) {
 		goto out_put_root;
-	err = hfsplus_cat_build_key(sb, fd.search_key, HFSPLUS_ROOT_CNID, &str);
-	if (unlikely(err < 0)) {
-		hfs_find_exit(&fd);
-		goto out_put_root;
-	}
-	if (!hfsplus_brec_read_cat(&fd, &entry)) {
-		hfs_find_exit(&fd);
+	} else {
 		if (entry.type != cpu_to_be16(HFSPLUS_FOLDER)) {
 			err = -EIO;
 			goto out_put_root;
@@ -585,8 +607,7 @@ static int hfsplus_fill_super(struct super_block *sb, struct fs_context *fc)
 			goto out_put_root;
 		}
 		sbi->hidden_dir = inode;
-	} else
-		hfs_find_exit(&fd);
+	}
 
 	if (!sb_rdonly(sb)) {
 		/*
@@ -627,6 +648,8 @@ static int hfsplus_fill_super(struct super_block *sb, struct fs_context *fc)
 			}
 
 			mutex_unlock(&sbi->vh_mutex);
+			hfsplus_mark_inode_dirty(HFSPLUS_CAT_TREE_I(sb),
+						 HFSPLUS_I_CAT_DIRTY);
 			hfsplus_mark_inode_dirty(sbi->hidden_dir,
 						 HFSPLUS_I_CAT_DIRTY);
 		}
@@ -654,7 +677,6 @@ out_free_vhdr:
 	kfree(sbi->s_vhdr_buf);
 	kfree(sbi->s_backup_vhdr_buf);
 out_unload_nls:
-	unload_nls(sbi->nls);
 	unload_nls(nls);
 	return err;
 }
@@ -701,7 +723,7 @@ static int hfsplus_init_fs_context(struct fs_context *fc)
 {
 	struct hfsplus_sb_info *sbi;
 
-	sbi = kzalloc(sizeof(struct hfsplus_sb_info), GFP_KERNEL);
+	sbi = kzalloc_obj(struct hfsplus_sb_info);
 	if (!sbi)
 		return -ENOMEM;
 

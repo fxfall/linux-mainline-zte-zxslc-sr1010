@@ -6,7 +6,6 @@
 
 #include <linux/clk-provider.h>
 #include <linux/init.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/module.h>
 
@@ -362,7 +361,7 @@ static const struct clk_div_table gxl_hdmi_pll_od_div_table[] = {
 
 static struct clk_regmap gxl_hdmi_pll_od = {
 	.data = &(struct clk_regmap_div_data){
-		.offset = HHI_HDMI_PLL_CNTL + 8,
+		.offset = HHI_HDMI_PLL_CNTL3,
 		.shift = 21,
 		.width = 2,
 		.table = gxl_hdmi_pll_od_div_table,
@@ -380,7 +379,7 @@ static struct clk_regmap gxl_hdmi_pll_od = {
 
 static struct clk_regmap gxl_hdmi_pll_od2 = {
 	.data = &(struct clk_regmap_div_data){
-		.offset = HHI_HDMI_PLL_CNTL + 8,
+		.offset = HHI_HDMI_PLL_CNTL3,
 		.shift = 23,
 		.width = 2,
 		.table = gxl_hdmi_pll_od_div_table,
@@ -398,7 +397,7 @@ static struct clk_regmap gxl_hdmi_pll_od2 = {
 
 static struct clk_regmap gxl_hdmi_pll = {
 	.data = &(struct clk_regmap_div_data){
-		.offset = HHI_HDMI_PLL_CNTL + 8,
+		.offset = HHI_HDMI_PLL_CNTL3,
 		.shift = 19,
 		.width = 2,
 		.table = gxl_hdmi_pll_od_div_table,
@@ -1394,7 +1393,7 @@ static struct clk_regmap gxbb_32k_clk_sel = {
 		.name = "32k_clk_sel",
 		.ops = &clk_regmap_mux_ops,
 		.parent_data = gxbb_32k_clk_parents,
-		.num_parents = 4,
+		.num_parents = ARRAY_SIZE(gxbb_32k_clk_parents),
 		.flags = CLK_SET_RATE_PARENT,
 	},
 };

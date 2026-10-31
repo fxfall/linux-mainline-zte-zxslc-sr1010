@@ -127,7 +127,7 @@ static int ioam6_genl_addns(struct sk_buff *skb, struct genl_info *info)
 		goto out_unlock;
 	}
 
-	ns = kzalloc(sizeof(*ns), GFP_KERNEL);
+	ns = kzalloc_obj(*ns);
 	if (!ns) {
 		err = -ENOMEM;
 		goto out_unlock;
@@ -245,7 +245,7 @@ static int ioam6_genl_dumpns_start(struct netlink_callback *cb)
 	struct rhashtable_iter *iter = (struct rhashtable_iter *)cb->args[0];
 
 	if (!iter) {
-		iter = kmalloc(sizeof(*iter), GFP_KERNEL);
+		iter = kmalloc_obj(*iter);
 		if (!iter)
 			return -ENOMEM;
 
@@ -431,7 +431,7 @@ static int ioam6_genl_dumpsc_start(struct netlink_callback *cb)
 	struct rhashtable_iter *iter = (struct rhashtable_iter *)cb->args[0];
 
 	if (!iter) {
-		iter = kmalloc(sizeof(*iter), GFP_KERNEL);
+		iter = kmalloc_obj(*iter);
 		if (!iter)
 			return -ENOMEM;
 
@@ -800,7 +800,7 @@ static void __ioam6_fill_trace_data(struct sk_buff *skb,
 	/* queue depth */
 	if (trace->type.bit6) {
 		struct netdev_queue *queue;
-		struct Qdisc *qdisc;
+		const struct Qdisc *qdisc;
 		__u32 qlen, backlog;
 
 		if (dev->flags & IFF_LOOPBACK ||
@@ -810,9 +810,7 @@ static void __ioam6_fill_trace_data(struct sk_buff *skb,
 			queue = skb_get_tx_queue(dev, skb);
 			qdisc = rcu_dereference(queue->qdisc);
 
-			spin_lock_bh(qdisc_lock(qdisc));
 			qdisc_qstats_qlen_backlog(qdisc, &qlen, &backlog);
-			spin_unlock_bh(qdisc_lock(qdisc));
 
 			*(__be32 *)data = cpu_to_be32(backlog);
 		}
@@ -984,7 +982,7 @@ static int __net_init ioam6_net_init(struct net *net)
 	struct ioam6_pernet_data *nsdata;
 	int err = -ENOMEM;
 
-	nsdata = kzalloc(sizeof(*nsdata), GFP_KERNEL);
+	nsdata = kzalloc_obj(*nsdata);
 	if (!nsdata)
 		goto out;
 

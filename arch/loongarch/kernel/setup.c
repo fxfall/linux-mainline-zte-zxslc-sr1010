@@ -402,14 +402,6 @@ static void __init arch_mem_init(char **cmdline_p)
 
 	check_kernel_sections_mem();
 
-	/*
-	 * In order to reduce the possibility of kernel panic when failed to
-	 * get IO TLB memory under CONFIG_SWIOTLB, it is better to allocate
-	 * low memory as small as possible before swiotlb_init(), so make
-	 * sparse_init() using top-down allocation.
-	 */
-	memblock_set_bottom_up(false);
-	sparse_init();
 	memblock_set_bottom_up(true);
 
 	swiotlb_init(true, SWIOTLB_VERBOSE);
@@ -478,7 +470,7 @@ static int __init add_legacy_isa_io(struct fwnode_handle *fwnode,
 	unsigned long vaddr;
 	struct logic_pio_hwaddr *range;
 
-	range = kzalloc(sizeof(*range), GFP_ATOMIC);
+	range = kzalloc_obj(*range, GFP_ATOMIC);
 	if (!range)
 		return -ENOMEM;
 
@@ -509,6 +501,8 @@ static int __init add_legacy_isa_io(struct fwnode_handle *fwnode,
 static __init int arch_reserve_pio_range(void)
 {
 	struct device_node *np;
+
+	acpi_add_early_pio();
 
 	for_each_node_by_name(np, "isa") {
 		struct of_range range;
@@ -601,6 +595,7 @@ void __init setup_arch(char **cmdline_p)
 {
 	cpu_probe();
 	unwind_init();
+	set_current(current);
 
 	init_environ();
 	efi_init();
@@ -608,6 +603,7 @@ void __init setup_arch(char **cmdline_p)
 	memblock_init();
 	pagetable_init();
 	bootcmdline_init(cmdline_p);
+	jump_label_init(); /* Initialise the static keys for early params */
 	parse_early_param();
 	reserve_initrd_mem();
 
@@ -615,14 +611,10 @@ void __init setup_arch(char **cmdline_p)
 	arch_mem_init(cmdline_p);
 
 	resource_init();
-	jump_label_init(); /* Initialise the static keys for paravirtualization */
-
 #ifdef CONFIG_SMP
 	plat_smp_setup();
 	prefill_possible_map();
 #endif
-
-	paging_init();
 
 #ifdef CONFIG_KASAN
 	kasan_init();

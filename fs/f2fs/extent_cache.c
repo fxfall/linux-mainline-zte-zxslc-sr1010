@@ -17,6 +17,7 @@
 
 #include "f2fs.h"
 #include "node.h"
+#include "segment.h"
 #include <trace/events/f2fs.h>
 
 bool sanity_check_extent_cache(struct inode *inode, struct folio *ifolio)
@@ -34,7 +35,7 @@ bool sanity_check_extent_cache(struct inode *inode, struct folio *ifolio)
 	if (!f2fs_is_valid_blkaddr(sbi, ei.blk, DATA_GENERIC_ENHANCE) ||
 	    !f2fs_is_valid_blkaddr(sbi, ei.blk + ei.len - 1,
 					DATA_GENERIC_ENHANCE)) {
-		f2fs_warn(sbi, "%s: inode (ino=%lx) extent info [%u, %u, %u] is incorrect, run fsck to fix",
+		f2fs_warn(sbi, "%s: inode (ino=%llx) extent info [%u, %u, %u] is incorrect, run fsck to fix",
 			  __func__, inode->i_ino,
 			  ei.blk, ei.fofs, ei.len);
 		return false;
@@ -50,22 +51,30 @@ bool sanity_check_extent_cache(struct inode *inode, struct folio *ifolio)
 
 		if (devi == 0) {
 			f2fs_warn(sbi,
-			    "%s: inode (ino=%lx) is an alias of meta device",
+			    "%s: inode (ino=%llx) is an alias of meta device",
 			    __func__, inode->i_ino);
 			return false;
 		}
 
 		if (bdev_is_zoned(FDEV(devi).bdev)) {
 			f2fs_warn(sbi,
-			    "%s: device alias inode (ino=%lx)'s extent info "
+			    "%s: device alias inode (ino=%llx)'s extent info "
 			    "[%u, %u, %u] maps to zoned block device",
 			    __func__, inode->i_ino, ei.blk, ei.fofs, ei.len);
+			return false;
+		}
+
+		if ((GET_SEGOFF_FROM_SEG0(sbi, ei.blk) % BLKS_PER_SEC(sbi)) ||
+		    (ei.len % BLKS_PER_SEC(sbi))) {
+			f2fs_warn(sbi, "%s: device alias inode (ino=%llx)'s extent info [%u, %u, %u] is not aligned to section size %u",
+				  __func__, inode->i_ino, ei.blk, ei.fofs, ei.len,
+				  BLKS_PER_SEC(sbi));
 			return false;
 		}
 		return true;
 	}
 
-	f2fs_warn(sbi, "%s: device alias inode (ino=%lx)'s extent info "
+	f2fs_warn(sbi, "%s: device alias inode (ino=%llx)'s extent info "
 			"[%u, %u, %u] is inconsistent w/ any devices",
 			__func__, inode->i_ino, ei.blk, ei.fofs, ei.len);
 	return false;

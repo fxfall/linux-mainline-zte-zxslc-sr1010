@@ -28,11 +28,11 @@ xhci_ring_to_sgtable(struct xhci_sideband *sb, struct xhci_ring *ring)
 	dev = xhci_to_hcd(sb->xhci)->self.sysdev;
 	sz = ring->num_segs * TRB_SEGMENT_SIZE;
 	n_pages = PAGE_ALIGN(sz) >> PAGE_SHIFT;
-	pages = kvmalloc_array(n_pages, sizeof(struct page *), GFP_KERNEL);
+	pages = kvmalloc_objs(struct page *, n_pages);
 	if (!pages)
 		return NULL;
 
-	sgt = kzalloc(sizeof(*sgt), GFP_KERNEL);
+	sgt = kzalloc_obj(*sgt);
 	if (!sgt) {
 		kvfree(pages);
 		return NULL;
@@ -57,6 +57,8 @@ xhci_ring_to_sgtable(struct xhci_sideband *sb, struct xhci_ring *ring)
 
 	if (sg_alloc_table_from_pages(sgt, pages, n_pages, 0, sz, GFP_KERNEL))
 		goto err;
+
+	kvfree(pages);
 
 	/*
 	 * Save first segment dma address to sg dma_address field for the sideband

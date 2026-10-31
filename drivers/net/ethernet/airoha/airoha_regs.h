@@ -312,10 +312,9 @@
 #define REG_PPE_HASH_SEED(_n)			(((_n) ? PPE2_BASE : PPE1_BASE) + 0x244)
 #define PPE_HASH_SEED				0x12345678
 
-#define REG_PPE_DFT_CPORT0(_n)			(((_n) ? PPE2_BASE : PPE1_BASE) + 0x248)
-#define DFT_CPORT_MASK(_n)			GENMASK(3 + ((_n) << 2), ((_n) << 2))
-
-#define REG_PPE_DFT_CPORT1(_n)			(((_n) ? PPE2_BASE : PPE1_BASE) + 0x24c)
+#define REG_PPE_DFT_CPORT_BASE(_n)		(((_n) ? PPE2_BASE : PPE1_BASE) + 0x248)
+#define REG_PPE_DFT_CPORT(_m, _n)		(REG_PPE_DFT_CPORT_BASE(_m) + (((_n) / 8) << 2))
+#define DFT_CPORT_MASK(_n)			GENMASK(3 + (((_n) % 8) << 2), (((_n) % 8) << 2))
 
 #define REG_PPE_TB_HASH_CFG(_n)			(((_n) ? PPE2_BASE : PPE1_BASE) + 0x250)
 #define PPE_DRAM_HASH1_MODE_MASK		GENMASK(31, 28)
@@ -328,9 +327,8 @@
 #define PPE_SRAM_TABLE_EN_MASK			BIT(0)
 
 #define REG_PPE_MTU_BASE(_n)			(((_n) ? PPE2_BASE : PPE1_BASE) + 0x304)
-#define REG_PPE_MTU(_m, _n)			(REG_PPE_MTU_BASE(_m) + ((_n) << 2))
-#define FP1_EGRESS_MTU_MASK			GENMASK(29, 16)
-#define FP0_EGRESS_MTU_MASK			GENMASK(13, 0)
+#define REG_PPE_MTU(_m, _n)			(REG_PPE_MTU_BASE(_m) + (((_n) / 2) << 2))
+#define FP_EGRESS_MTU_MASK(_n)			GENMASK(13 + (((_n) % 2) << 4), ((_n) % 2) << 4)
 
 #define REG_PPE_RAM_CTRL(_n)			(((_n) ? PPE2_BASE : PPE1_BASE) + 0x31c)
 #define PPE_SRAM_CTRL_ACK_MASK			BIT(31)
@@ -376,10 +374,12 @@
 #define SP_CPORT_MASK(_n)		GENMASK(3 + ((_n) << 2), ((_n) << 2))
 
 #define REG_SRC_PORT_FC_MAP6		0x2298
-#define FC_ID_OF_SRC_PORT27_MASK	GENMASK(28, 24)
-#define FC_ID_OF_SRC_PORT26_MASK	GENMASK(20, 16)
-#define FC_ID_OF_SRC_PORT25_MASK	GENMASK(12, 8)
-#define FC_ID_OF_SRC_PORT24_MASK	GENMASK(4, 0)
+#define FC_ID_OF_SRC_PORT_MASK(_n)	GENMASK(4 + ((_n) << 3), ((_n) << 3))
+#define FC_MAP6_DEF_VALUE		0x1b1a1918
+
+#define REG_WAN_MTU0			0x2300
+#define WAN_MTU1_MASK			GENMASK(29, 16)
+#define WAN_MTU0_MASK			GENMASK(13, 0)
 
 #define REG_CDM5_RX_OQ1_DROP_CNT	0x29d4
 

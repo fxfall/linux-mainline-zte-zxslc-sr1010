@@ -101,7 +101,7 @@ static int sof_compr_open(struct snd_soc_component *component,
 	struct snd_sof_pcm *spcm;
 	int dir;
 
-	sstream = kzalloc(sizeof(*sstream), GFP_KERNEL);
+	sstream = kzalloc_obj(*sstream);
 	if (!sstream)
 		return -ENOMEM;
 
@@ -195,6 +195,14 @@ static int sof_compr_set_params(struct snd_soc_component *component,
 	if (sizeof(*pcm) + ext_data_size > sdev->ipc->max_payload_size)
 		return -EINVAL;
 
+	/*
+	 * Make sure that the DSP is booted up, which might not be the
+	 * case if the on-demand DSP boot is used
+	 */
+	ret = snd_sof_boot_dsp_firmware(sdev);
+	if (ret)
+		return ret;
+
 	pcm = kzalloc(sizeof(*pcm) + ext_data_size, GFP_KERNEL);
 	if (!pcm)
 		return -ENOMEM;
@@ -239,8 +247,8 @@ static int sof_compr_set_params(struct snd_soc_component *component,
 	ret = snd_sof_set_stream_data_offset(sdev, &spcm->stream[cstream->direction],
 					     ipc_params_reply.posn_offset);
 	if (ret < 0) {
-		dev_err(component->dev, "Invalid stream data offset for Compr %d\n",
-			spcm->pcm.pcm_id);
+		dev_err(component->dev, "Invalid stream data offset for Compr %u\n",
+			le32_to_cpu(spcm->pcm.pcm_id));
 		goto out;
 	}
 

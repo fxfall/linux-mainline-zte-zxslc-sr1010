@@ -3,7 +3,7 @@
  * Copyright (C) 2018-2023 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -252,7 +252,7 @@ xrep_bmap_walk_rmap(
 	if (xchk_should_terminate(rb->sc, &error))
 		return error;
 
-	if (rec->rm_owner != rb->sc->ip->i_ino)
+	if (rec->rm_owner != I_INO(rb->sc->ip))
 		return 0;
 
 	error = xrep_bmap_check_fork_rmap(rb, cur, rec);
@@ -416,7 +416,7 @@ xrep_bmap_walk_rtrmap(
 		return error;
 
 	/* Skip extents which are not owned by this inode and fork. */
-	if (rec->rm_owner != rb->sc->ip->i_ino)
+	if (rec->rm_owner != I_INO(rb->sc->ip))
 		return 0;
 
 	error = xrep_bmap_check_rtfork_rmap(rb->sc, cur, rec);
@@ -760,7 +760,7 @@ xrep_bmap_build_new_fork(
 	 * Prepare to construct the new fork by initializing the new btree
 	 * structure and creating a fake ifork in the ifakeroot structure.
 	 */
-	xfs_rmap_ino_bmbt_owner(&oinfo, sc->ip->i_ino, rb->whichfork);
+	xfs_rmap_inode_bmbt_owner(&oinfo, sc->ip, rb->whichfork);
 	error = xrep_newbt_init_inode(&rb->new_bmapbt, sc, rb->whichfork,
 			&oinfo);
 	if (error)
@@ -833,7 +833,7 @@ xrep_bmap_remove_old_tree(
 	struct xfs_owner_info	oinfo;
 
 	/* Free the old bmbt blocks if they're not in use. */
-	xfs_rmap_ino_bmbt_owner(&oinfo, sc->ip->i_ino, rb->whichfork);
+	xfs_rmap_inode_bmbt_owner(&oinfo, sc->ip, rb->whichfork);
 	return xrep_reap_fsblocks(sc, &rb->old_bmbt_blocks, &oinfo);
 }
 
@@ -933,7 +933,7 @@ xrep_bmap(
 	if (error)
 		return error;
 
-	rb = kzalloc(sizeof(struct xrep_bmap), XCHK_GFP_FLAGS);
+	rb = kzalloc_obj(struct xrep_bmap, XCHK_GFP_FLAGS);
 	if (!rb)
 		return -ENOMEM;
 	rb->sc = sc;

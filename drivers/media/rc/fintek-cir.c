@@ -465,7 +465,7 @@ static int fintek_probe(struct pnp_dev *pdev, const struct pnp_device_id *dev_id
 	struct rc_dev *rdev;
 	int ret = -ENOMEM;
 
-	fintek = kzalloc(sizeof(struct fintek_dev), GFP_KERNEL);
+	fintek = kzalloc_obj(struct fintek_dev);
 	if (!fintek)
 		return ret;
 
@@ -642,8 +642,8 @@ static void fintek_shutdown(struct pnp_dev *pdev)
 }
 
 static const struct pnp_device_id fintek_ids[] = {
-	{ "FIT0002", 0 },   /* CIR */
-	{ "", 0 },
+	{ .id = "FIT0002" },   /* CIR */
+	{ }
 };
 
 static struct pnp_driver fintek_driver = {

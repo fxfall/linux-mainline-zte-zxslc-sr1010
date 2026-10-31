@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/module.h>
@@ -6,6 +7,7 @@
 #include <linux/netdevice.h>
 #include <linux/tc_act/tc_csum.h>
 #include <net/flow_offload.h>
+#include <net/ip_tunnels.h>
 #include <net/netfilter/nf_flow_table.h>
 #include <net/netfilter/nf_tables.h>
 #include <net/netfilter/nf_conntrack.h>
@@ -594,7 +596,7 @@ static int flow_offload_redirect(struct net *net,
 	switch (this_tuple->xmit_type) {
 	case FLOW_OFFLOAD_XMIT_DIRECT:
 		this_tuple = &flow->tuplehash[dir].tuple;
-		ifindex = this_tuple->out.hw_ifidx;
+		ifindex = this_tuple->out.ifidx;
 		break;
 	case FLOW_OFFLOAD_XMIT_NEIGH:
 		other_tuple = &flow->tuplehash[!dir].tuple;
@@ -804,7 +806,7 @@ nf_flow_offload_rule_alloc(struct net *net,
 	struct nf_flow_rule *flow_rule;
 	int err = -ENOMEM;
 
-	flow_rule = kzalloc(sizeof(*flow_rule), GFP_KERNEL);
+	flow_rule = kzalloc_obj(*flow_rule);
 	if (!flow_rule)
 		goto err_flow;
 
@@ -987,6 +989,15 @@ out:
 	nf_flow_offload_destroy(flow_rule);
 }
 
+static void flow_offload_work_del(struct flow_offload_work *offload)
+{
+	clear_bit(IPS_HW_OFFLOAD_BIT, &offload->flow->ct->status);
+	flow_offload_tuple_del(offload, FLOW_OFFLOAD_DIR_ORIGINAL);
+	if (test_bit(NF_FLOW_HW_BIDIRECTIONAL, &offload->flow->flags))
+		flow_offload_tuple_del(offload, FLOW_OFFLOAD_DIR_REPLY);
+	set_bit(NF_FLOW_HW_DEAD, &offload->flow->flags);
+}
+
 static void flow_offload_tuple_stats(struct flow_offload_work *offload,
 				     enum flow_offload_tuple_dir dir,
 				     struct flow_stats *stats)
@@ -1000,7 +1011,6 @@ static void flow_offload_tuple_stats(struct flow_offload_work *offload,
 static void flow_offload_work_stats(struct flow_offload_work *offload)
 {
 	struct flow_stats stats[FLOW_OFFLOAD_DIR_MAX] = {};
-	enum flow_offload_tuple_dir dir;
 	u64 lastused;
 
 	flow_offload_tuple_stats(offload, FLOW_OFFLOAD_DIR_ORIGINAL, &stats[0]);
@@ -1022,31 +1032,6 @@ static void flow_offload_work_stats(struct flow_offload_work *offload)
 				       FLOW_OFFLOAD_DIR_REPLY,
 				       stats[1].pkts, stats[1].bytes);
 	}
-
-	for (dir = 0; dir < FLOW_OFFLOAD_DIR_MAX; dir++) {
-		if (!stats[dir].pkts)
-			continue;
-		nf_flow_encap_tx_acct(offload->flow, dir, stats[dir].pkts,
-				      stats[dir].bytes);
-		nf_flow_encap_rx_acct(offload->flow, dir, stats[dir].pkts,
-				      stats[dir].bytes);
-	}
-}
-
-static void flow_offload_work_del(struct flow_offload_work *offload)
-{
-	/*
-	 * Statistics are only polled once the flow timeout has run down by a
-	 * tenth, so up to several seconds of traffic forwarded in hardware are
-	 * not yet in the conntrack counters when the flow is torn down. Collect
-	 * them before the rules, and the counters with them, are gone.
-	 */
-	flow_offload_work_stats(offload);
-	clear_bit(IPS_HW_OFFLOAD_BIT, &offload->flow->ct->status);
-	flow_offload_tuple_del(offload, FLOW_OFFLOAD_DIR_ORIGINAL);
-	if (test_bit(NF_FLOW_HW_BIDIRECTIONAL, &offload->flow->flags))
-		flow_offload_tuple_del(offload, FLOW_OFFLOAD_DIR_REPLY);
-	set_bit(NF_FLOW_HW_DEAD, &offload->flow->flags);
 }
 
 static void flow_offload_work_handler(struct work_struct *work)
@@ -1072,8 +1057,9 @@ static void flow_offload_work_handler(struct work_struct *work)
 		default:
 			WARN_ON_ONCE(1);
 	}
+	smp_mb__before_atomic();
+	clear_bit(NF_FLOW_PENDING, &offload->flow->flags);
 
-	clear_bit(NF_FLOW_HW_PENDING, &offload->flow->flags);
 	kfree(offload);
 }
 
@@ -1099,12 +1085,12 @@ nf_flow_offload_work_alloc(struct nf_flowtable *flowtable,
 {
 	struct flow_offload_work *offload;
 
-	if (test_and_set_bit(NF_FLOW_HW_PENDING, &flow->flags))
+	if (test_and_set_bit(NF_FLOW_PENDING, &flow->flags))
 		return NULL;
 
-	offload = kmalloc(sizeof(struct flow_offload_work), GFP_ATOMIC);
+	offload = kmalloc_obj(struct flow_offload_work, GFP_ATOMIC);
 	if (!offload) {
-		clear_bit(NF_FLOW_HW_PENDING, &flow->flags);
+		clear_bit(NF_FLOW_PENDING, &flow->flags);
 		return NULL;
 	}
 
@@ -1116,9 +1102,17 @@ nf_flow_offload_work_alloc(struct nf_flowtable *flowtable,
 	return offload;
 }
 
+static bool nf_flow_offload_unsupported(struct flow_offload *flow)
+{
+	if (flow->tuplehash[FLOW_OFFLOAD_DIR_ORIGINAL].tuple.tun_num ||
+	    flow->tuplehash[FLOW_OFFLOAD_DIR_REPLY].tuple.tun_num)
+		return true;
 
-void nf_flow_offload_add(struct nf_flowtable *flowtable,
-			 struct flow_offload *flow)
+	return false;
+}
+
+void nf_flow_offload_refresh(struct nf_flowtable *flowtable,
+			     struct flow_offload *flow)
 {
 	struct flow_offload_work *offload;
 
@@ -1127,6 +1121,16 @@ void nf_flow_offload_add(struct nf_flowtable *flowtable,
 		return;
 
 	flow_offload_queue_work(offload);
+}
+
+void nf_flow_offload_add(struct nf_flowtable *flowtable,
+			 struct flow_offload *flow)
+{
+	if (nf_flow_offload_unsupported(flow))
+		return;
+
+	set_bit(NF_FLOW_HW, &flow->flags);
+	nf_flow_offload_refresh(flowtable, flow);
 }
 
 void nf_flow_offload_del(struct nf_flowtable *flowtable,

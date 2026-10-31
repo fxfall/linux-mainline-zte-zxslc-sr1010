@@ -135,7 +135,7 @@ static int virtual_ncidev_open(struct inode *inode, struct file *file)
 	int ret = 0;
 	struct virtual_nci_dev *vdev;
 
-	vdev = kzalloc(sizeof(*vdev), GFP_KERNEL);
+	vdev = kzalloc_obj(*vdev);
 	if (!vdev)
 		return -ENOMEM;
 	vdev->ndev = nci_allocate_device(&virtual_nci_ops,
@@ -195,7 +195,8 @@ static const struct file_operations virtual_ncidev_fops = {
 	.write = virtual_ncidev_write,
 	.open = virtual_ncidev_open,
 	.release = virtual_ncidev_close,
-	.unlocked_ioctl = virtual_ncidev_ioctl
+	.unlocked_ioctl = virtual_ncidev_ioctl,
+	.compat_ioctl = compat_ptr_ioctl,
 };
 
 static struct miscdevice miscdev = {

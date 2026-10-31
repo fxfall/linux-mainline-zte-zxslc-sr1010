@@ -35,7 +35,7 @@ static struct iommu_mm_data *iommu_alloc_mm_data(struct mm_struct *mm, struct de
 		return iommu_mm;
 	}
 
-	iommu_mm = kzalloc(sizeof(struct iommu_mm_data), GFP_KERNEL);
+	iommu_mm = kzalloc_obj(struct iommu_mm_data);
 	if (!iommu_mm)
 		return ERR_PTR(-ENOMEM);
 
@@ -108,7 +108,7 @@ struct iommu_sva *iommu_sva_bind_device(struct device *dev, struct mm_struct *mm
 		goto out_unlock;
 	}
 
-	handle = kzalloc(sizeof(*handle), GFP_KERNEL);
+	handle = kzalloc_obj(*handle);
 	if (!handle) {
 		ret = -ENOMEM;
 		goto out_unlock;
@@ -145,8 +145,8 @@ struct iommu_sva *iommu_sva_bind_device(struct device *dev, struct mm_struct *mm
 	list_add(&domain->next, &iommu_mm->sva_domains);
 out:
 	refcount_set(&handle->users, 1);
-	mutex_unlock(&iommu_sva_lock);
 	handle->dev = dev;
+	mutex_unlock(&iommu_sva_lock);
 	return handle;
 
 out_free_domain:

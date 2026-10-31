@@ -5,6 +5,7 @@
  */
 
 #include <linux/fs.h>
+#include <linux/filelock.h>
 #include <linux/namei.h>
 #include <linux/ctype.h>
 #include <linux/quotaops.h>
@@ -60,7 +61,7 @@ static inline void free_ea_wmap(struct inode *inode)
  *
  */
 static int jfs_create(struct mnt_idmap *idmap, struct inode *dip,
-		      struct dentry *dentry, umode_t mode, bool excl)
+		      struct dentry *dentry, umode_t mode)
 {
 	int rc = 0;
 	tid_t tid;		/* transaction id */
@@ -222,7 +223,7 @@ static struct dentry *jfs_mkdir(struct mnt_idmap *idmap, struct inode *dip,
 	 * block there while holding dtree page, so we allocate the inode &
 	 * begin the transaction before we search the directory.
 	 */
-	ip = ialloc(dip, S_IFDIR | mode);
+	ip = ialloc(dip, mode);
 	if (IS_ERR(ip)) {
 		rc = PTR_ERR(ip);
 		goto out2;
@@ -1547,6 +1548,7 @@ const struct file_operations jfs_dir_operations = {
 	.unlocked_ioctl = jfs_ioctl,
 	.compat_ioctl	= compat_ptr_ioctl,
 	.llseek		= generic_file_llseek,
+	.setlease	= generic_setlease,
 };
 
 static int jfs_ci_hash(const struct dentry *dir, struct qstr *this)

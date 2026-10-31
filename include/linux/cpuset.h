@@ -18,6 +18,8 @@
 #include <linux/mmu_context.h>
 #include <linux/jump_label.h>
 
+extern bool lockdep_is_cpuset_held(void);
+
 #ifdef CONFIG_CPUSETS
 
 /*
@@ -74,13 +76,15 @@ extern void inc_dl_tasks_cs(struct task_struct *task);
 extern void dec_dl_tasks_cs(struct task_struct *task);
 extern void cpuset_lock(void);
 extern void cpuset_unlock(void);
+extern void lockdep_assert_cpuset_lock_held(void);
+extern void cpuset_cpus_allowed_locked(struct task_struct *p, struct cpumask *mask);
 extern void cpuset_cpus_allowed(struct task_struct *p, struct cpumask *mask);
 extern bool cpuset_cpus_allowed_fallback(struct task_struct *p);
-extern bool cpuset_cpu_is_isolated(int cpu);
+extern int cpuset_num_cpus(struct cgroup *cgroup);
 extern nodemask_t cpuset_mems_allowed(struct task_struct *p);
 #define cpuset_current_mems_allowed (current->mems_allowed)
 void cpuset_init_current_mems_allowed(void);
-int cpuset_nodemask_valid_mems_allowed(nodemask_t *nodemask);
+int cpuset_nodemask_valid_mems_allowed(const nodemask_t *nodemask);
 
 extern bool cpuset_current_node_allowed(int node, gfp_t gfp_mask);
 
@@ -194,11 +198,18 @@ static inline void inc_dl_tasks_cs(struct task_struct *task) { }
 static inline void dec_dl_tasks_cs(struct task_struct *task) { }
 static inline void cpuset_lock(void) { }
 static inline void cpuset_unlock(void) { }
+static inline void lockdep_assert_cpuset_lock_held(void) { }
+
+static inline void cpuset_cpus_allowed_locked(struct task_struct *p,
+					struct cpumask *mask)
+{
+	cpumask_copy(mask, task_cpu_possible_mask(p));
+}
 
 static inline void cpuset_cpus_allowed(struct task_struct *p,
 				       struct cpumask *mask)
 {
-	cpumask_copy(mask, task_cpu_possible_mask(p));
+	cpuset_cpus_allowed_locked(p, mask);
 }
 
 static inline bool cpuset_cpus_allowed_fallback(struct task_struct *p)
@@ -206,9 +217,9 @@ static inline bool cpuset_cpus_allowed_fallback(struct task_struct *p)
 	return false;
 }
 
-static inline bool cpuset_cpu_is_isolated(int cpu)
+static inline int cpuset_num_cpus(struct cgroup *cgroup)
 {
-	return false;
+	return num_online_cpus();
 }
 
 static inline nodemask_t cpuset_mems_allowed(struct task_struct *p)
@@ -219,7 +230,7 @@ static inline nodemask_t cpuset_mems_allowed(struct task_struct *p)
 #define cpuset_current_mems_allowed (node_states[N_MEMORY])
 static inline void cpuset_init_current_mems_allowed(void) {}
 
-static inline int cpuset_nodemask_valid_mems_allowed(nodemask_t *nodemask)
+static inline int cpuset_nodemask_valid_mems_allowed(const nodemask_t *nodemask)
 {
 	return 1;
 }
@@ -268,6 +279,7 @@ static inline void dl_rebuild_rd_accounting(void)
 
 static inline void rebuild_sched_domains(void)
 {
+	guard(cpus_read_lock)();
 	partition_sched_domains(1, NULL, NULL);
 }
 

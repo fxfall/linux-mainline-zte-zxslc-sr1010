@@ -19,7 +19,7 @@
 
 #include <linux/delay.h>
 #include <linux/export.h>
-#include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
 #include <linux/kernel.h>
 #include <linux/math.h>
 #include <linux/minmax.h>
@@ -632,6 +632,25 @@ static void b53_port_set_learning(struct b53_device *dev, int port,
 	b53_write16(dev, B53_CTRL_PAGE, B53_DIS_LEARNING, reg);
 }
 
+static void b53_port_set_isolated(struct b53_device *dev, int port,
+				  bool isolated)
+{
+	u8 offset;
+	u16 reg;
+
+	if (is5325(dev))
+		offset = B53_PROTECTED_PORT_SEL_25;
+	else
+		offset = B53_PROTECTED_PORT_SEL;
+
+	b53_read16(dev, B53_CTRL_PAGE, offset, &reg);
+	if (isolated)
+		reg |= BIT(port);
+	else
+		reg &= ~BIT(port);
+	b53_write16(dev, B53_CTRL_PAGE, offset, reg);
+}
+
 static void b53_eee_enable_set(struct dsa_switch *ds, int port, bool enable)
 {
 	struct b53_device *dev = ds->priv;
@@ -652,6 +671,7 @@ int b53_setup_port(struct dsa_switch *ds, int port)
 	b53_port_set_ucast_flood(dev, port, true);
 	b53_port_set_mcast_flood(dev, port, true);
 	b53_port_set_learning(dev, port, false);
+	b53_port_set_isolated(dev, port, false);
 
 	/* Force all traffic to go to the CPU port to prevent the ASIC from
 	 * trying to forward to bridged ports on matching FDB entries, then
@@ -852,10 +872,7 @@ static void b53_enable_stp(struct b53_device *dev)
 
 static u16 b53_default_pvid(struct b53_device *dev)
 {
-	if (is5325(dev) || is5365(dev))
-		return 1;
-	else
-		return 0;
+	return 0;
 }
 
 static bool b53_vlan_port_needs_forced_tagged(struct dsa_switch *ds, int port)
@@ -948,17 +965,17 @@ EXPORT_SYMBOL(b53_configure_vlan);
 
 static void b53_switch_reset_gpio(struct b53_device *dev)
 {
-	int gpio = dev->reset_gpio;
+	struct gpio_desc *gpio = dev->reset_gpio;
 
-	if (gpio < 0)
+	if (IS_ERR(gpio))
 		return;
 
 	/* Reset sequence: RESET low(50ms)->high(20ms)
 	 */
-	gpio_set_value(gpio, 0);
+	gpiod_set_value(gpio, 0);
 	mdelay(50);
 
-	gpio_set_value(gpio, 1);
+	gpiod_set_value(gpio, 1);
 	mdelay(20);
 
 	dev->current_page = 0xff;
@@ -1208,6 +1225,7 @@ int b53_get_sset_count(struct dsa_switch *ds, int port, int sset)
 EXPORT_SYMBOL(b53_get_sset_count);
 
 enum b53_devlink_resource_id {
+	B53_DEVLINK_PARAM_ID_NONE,  /* DEVLINK_RESOURCE_ID_PARENT_TOP */
 	B53_DEVLINK_PARAM_ID_VLAN_TABLE,
 };
 
@@ -1678,9 +1696,6 @@ static int b53_vlan_prepare(struct dsa_switch *ds, int port,
 			    const struct switchdev_obj_port_vlan *vlan)
 {
 	struct b53_device *dev = ds->priv;
-
-	if ((is5325(dev) || is5365(dev)) && vlan->vid == 0)
-		return -EOPNOTSUPP;
 
 	/* Port 7 on 7278 connects to the ASP's UniMAC which is not capable of
 	 * receiving VLAN tagged frames at all, we can still allow the port to
@@ -2204,7 +2219,7 @@ int b53_fdb_dump(struct dsa_switch *ds, int port,
 
 	mutex_unlock(&priv->arl_mutex);
 
-	return 0;
+	return ret;
 }
 EXPORT_SYMBOL(b53_fdb_dump);
 
@@ -2412,7 +2427,7 @@ int b53_br_flags_pre(struct dsa_switch *ds, int port,
 		     struct netlink_ext_ack *extack)
 {
 	struct b53_device *dev = ds->priv;
-	unsigned long mask = (BR_FLOOD | BR_MCAST_FLOOD);
+	unsigned long mask = (BR_FLOOD | BR_MCAST_FLOOD | BR_ISOLATED);
 
 	if (!is5325(dev))
 		mask |= BR_LEARNING;
@@ -2437,6 +2452,9 @@ int b53_br_flags(struct dsa_switch *ds, int port,
 	if (flags.mask & BR_LEARNING)
 		b53_port_set_learning(ds->priv, port,
 				      !!(flags.val & BR_LEARNING));
+	if (flags.mask & BR_ISOLATED)
+		b53_port_set_isolated(ds->priv, port,
+				      !!(flags.val & BR_ISOLATED));
 
 	return 0;
 }
@@ -3075,7 +3093,6 @@ static int b53_switch_init(struct b53_device *dev)
 {
 	u32 chip_id = dev->chip_id;
 	unsigned int i;
-	int ret;
 
 	if (is63xx(dev))
 		chip_id = BCM63XX_DEVICE_ID;
@@ -3156,12 +3173,9 @@ static int b53_switch_init(struct b53_device *dev)
 		return -ENOMEM;
 
 	dev->reset_gpio = b53_switch_get_reset_gpio(dev);
-	if (dev->reset_gpio >= 0) {
-		ret = devm_gpio_request_one(dev->dev, dev->reset_gpio,
-					    GPIOF_OUT_INIT_HIGH, "robo_reset");
-		if (ret)
-			return ret;
-	}
+
+	if (PTR_ERR(dev->reset_gpio) == -EPROBE_DEFER)
+		return -EPROBE_DEFER;
 
 	return 0;
 }

@@ -3,7 +3,7 @@
  * Copyright (c) 2018-2024 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -172,7 +172,7 @@ xrep_setup_ag_rmapbt(
 	if (error)
 		return error;
 
-	rr = kzalloc(sizeof(struct xrep_rmap), XCHK_GFP_FLAGS);
+	rr = kzalloc_obj(struct xrep_rmap, XCHK_GFP_FLAGS);
 	if (!rr)
 		return -ENOMEM;
 
@@ -570,7 +570,7 @@ xrep_rmap_scan_ifork(
 	int			whichfork)
 {
 	struct xrep_rmap_ifork	rf = {
-		.accum		= { .rm_owner = ip->i_ino, },
+		.accum		= { .rm_owner = I_INO(ip), },
 		.rr		= rr,
 		.whichfork	= whichfork,
 	};
@@ -1109,6 +1109,7 @@ xrep_rmap_try_reserve(
 		return error;
 
 	error = xfs_agfl_walk(sc->mp, agf, agfl_bp, xrep_rmap_walk_agfl, &ra);
+	xfs_trans_brelse(sc->tp, agfl_bp);
 	if (error)
 		return error;
 

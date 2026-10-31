@@ -80,7 +80,7 @@ static void drm_gem_shmem_test_obj_create_private(struct kunit *test)
 	buf = kunit_kzalloc(test, TEST_SIZE, GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, buf);
 
-	sgt = kzalloc(sizeof(*sgt), GFP_KERNEL);
+	sgt = kzalloc_obj(*sgt);
 	KUNIT_ASSERT_NOT_NULL(test, sgt);
 
 	ret = kunit_add_action_or_reset(test, kfree_wrapper, sgt);
@@ -95,13 +95,9 @@ static void drm_gem_shmem_test_obj_create_private(struct kunit *test)
 	sg_init_one(sgt->sgl, buf, TEST_SIZE);
 
 	/*
-	 * Set the DMA mask to 64-bits and map the sgtables
-	 * otherwise drm_gem_shmem_free will cause a warning
-	 * on debug kernels.
+	 * Map the sgtables otherwise drm_gem_shmem_free will cause a warning on
+	 * debug kernels.
 	 */
-	ret = dma_set_mask(drm_dev->dev, DMA_BIT_MASK(64));
-	KUNIT_ASSERT_EQ(test, ret, 0);
-
 	ret = dma_map_sgtable(drm_dev->dev, sgt, DMA_BIDIRECTIONAL, 0);
 	KUNIT_ASSERT_EQ(test, ret, 0);
 
@@ -352,10 +348,18 @@ static int drm_gem_shmem_test_init(struct kunit *test)
 {
 	struct device *dev;
 	struct drm_device *drm_dev;
+	int ret;
 
 	/* Allocate a parent device */
 	dev = drm_kunit_helper_alloc_device(test);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, dev);
+
+	/*
+	 * Set the DMA mask to 64-bits to avoid intermittent failures calling
+	 * drm_gem_shmem_get_pages_sgt().
+	 */
+	ret = dma_set_mask(dev, DMA_BIT_MASK(64));
+	KUNIT_ASSERT_EQ(test, ret, 0);
 
 	/*
 	 * The DRM core will automatically initialize the GEM core and create

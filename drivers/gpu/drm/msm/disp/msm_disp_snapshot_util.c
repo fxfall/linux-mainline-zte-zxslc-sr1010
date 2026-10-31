@@ -5,7 +5,7 @@
 
 #define pr_fmt(fmt)	"[drm:%s:%d] " fmt, __func__, __LINE__
 
-#include <generated/utsrelease.h>
+#include <linux/utsname.h>
 
 #include "msm_disp_snapshot.h"
 
@@ -91,11 +91,10 @@ void msm_disp_state_print(struct msm_disp_state *state, struct drm_printer *p)
 	}
 
 	drm_printf(p, "---\n");
-	drm_printf(p, "kernel: " UTS_RELEASE "\n");
+	drm_printf(p, "kernel: %s\n", init_utsname()->release);
 	drm_printf(p, "module: " KBUILD_MODNAME "\n");
 	drm_printf(p, "dpu devcoredump\n");
-	drm_printf(p, "time: %lld.%09ld\n",
-		state->time.tv_sec, state->time.tv_nsec);
+	drm_printf(p, "time: %ptSp\n", &state->time);
 
 	list_for_each_entry_safe(block, tmp, &state->blocks, node) {
 		drm_printf(p, "====================%s================\n", block->name);
@@ -165,7 +164,7 @@ void msm_disp_state_free(void *data)
 	struct msm_disp_state_block *block, *tmp;
 
 	if (disp_state->atomic_state) {
-		drm_atomic_state_put(disp_state->atomic_state);
+		drm_atomic_commit_put(disp_state->atomic_state);
 		disp_state->atomic_state = NULL;
 	}
 
@@ -185,7 +184,7 @@ void msm_disp_snapshot_add_block(struct msm_disp_state *disp_state, u32 len,
 	struct va_format vaf;
 	va_list va;
 
-	new_blk = kzalloc(sizeof(struct msm_disp_state_block), GFP_KERNEL);
+	new_blk = kzalloc_obj(struct msm_disp_state_block);
 	if (!new_blk)
 		return;
 

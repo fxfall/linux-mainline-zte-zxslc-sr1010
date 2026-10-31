@@ -416,6 +416,14 @@ static bool iptfs_skb_can_add_frags(const struct sk_buff *skb,
 	if (skb_has_frag_list(skb) || skb->pp_recycle != walk->pp_recycle)
 		return false;
 
+	/* Reject an @offset that is at or beyond the end of the walk's data
+	 * before calling iptfs_skb_reset_frag_walk(), whose fragment-advance
+	 * loop is otherwise unbounded and would index past walk->frags[].
+	 * This mirrors the guard already present in iptfs_skb_add_frags().
+	 */
+	if (!walk->nr_frags || offset >= walk->total + walk->initial_offset)
+		return false;
+
 	/* Make offset relative to current frag after setting that */
 	offset = iptfs_skb_reset_frag_walk(walk, offset);
 
@@ -480,6 +488,7 @@ static int iptfs_skb_add_frags(struct sk_buff *skb,
 		}
 		__skb_frag_ref(tofrag);
 		shinfo->nr_frags++;
+		shinfo->flags |= SKBFL_SHARED_FRAG;
 
 		/* see if we are done */
 		fraglen = tofrag->len;
@@ -819,8 +828,8 @@ static u32 iptfs_reassem_cont(struct xfrm_iptfs_data *xtfs, u64 seq,
 		 * allocate an in progress skb
 		 */
 		ipremain = __iptfs_iplen(xtfs->ra_runt);
-		if (ipremain < sizeof(xtfs->ra_runt)) {
-			/* length has to be at least runtsize large */
+		if (ipremain < __iptfs_iphlen(xtfs->ra_runt)) {
+			/* length has to be at least the IP header size */
 			XFRM_INC_STATS(xs_net(xtfs->x),
 				       LINUX_MIB_XFRMINIPTFSERROR);
 			goto abandon;
@@ -2541,8 +2550,8 @@ static int iptfs_user_init(struct net *net, struct xfrm_state *x,
 			nla_get_u16(attrs[XFRMA_IPTFS_REORDER_WINDOW]);
 	/* saved array is for saving 1..N seq nums from wantseq */
 	if (xc->reorder_win_size) {
-		xtfs->w_saved = kcalloc(xc->reorder_win_size,
-					sizeof(*xtfs->w_saved), GFP_KERNEL);
+		xtfs->w_saved = kzalloc_objs(*xtfs->w_saved,
+					     xc->reorder_win_size);
 		if (!xtfs->w_saved) {
 			NL_SET_ERR_MSG(extack, "Cannot alloc reorder window");
 			return -ENOMEM;
@@ -2671,8 +2680,7 @@ static int iptfs_clone_state(struct xfrm_state *x, struct xfrm_state *orig)
 		return -ENOMEM;
 
 	if (xtfs->cfg.reorder_win_size) {
-		w_saved = kcalloc(xtfs->cfg.reorder_win_size,
-				  sizeof(*w_saved), GFP_KERNEL);
+		w_saved = kzalloc_objs(*w_saved, xtfs->cfg.reorder_win_size);
 		if (!w_saved) {
 			kfree_sensitive(xtfs);
 			return -ENOMEM;
@@ -2711,7 +2719,7 @@ static int iptfs_init_state(struct xfrm_state *x)
 		/* We have arrived here from xfrm_state_clone() */
 		xtfs = x->mode_data;
 	} else {
-		xtfs = kzalloc(sizeof(*xtfs), GFP_KERNEL);
+		xtfs = kzalloc_obj(*xtfs);
 		if (!xtfs)
 			return -ENOMEM;
 	}

@@ -2,7 +2,7 @@
 #ifndef __LINUX_USB_H
 #define __LINUX_USB_H
 
-#include <linux/mod_devicetable.h>
+#include <linux/device-id/usb.h>
 #include <linux/usb/ch9.h>
 
 #define USB_MAJOR			180
@@ -1185,7 +1185,8 @@ extern ssize_t usb_show_dynids(struct usb_dynids *dynids, char *buf);
  *	interface.  It may also use usb_set_interface() to specify the
  *	appropriate altsetting.  If unwilling to manage the interface,
  *	return -ENODEV, if genuine IO errors occurred, an appropriate
- *	negative errno value.
+ *	negative errno value.  The usb_device_id parameter is only valid during
+ *	probe.
  * @disconnect: Called when the interface is no longer accessible, usually
  *	because its device has been (or is being) disconnected or the
  *	driver module is being unloaded.
@@ -1302,8 +1303,7 @@ struct usb_driver {
  *	resume and suspend functions will be called in addition to the driver's
  *	own, so this part of the setup does not need to be replicated.
  *
- * USB drivers must provide all the fields listed above except driver,
- * match, and id_table.
+ * USB device drivers must provide a name, other driver fields are optional.
  */
 struct usb_device_driver {
 	const char *name;
@@ -2083,6 +2083,8 @@ static inline int usb_translate_errors(int error_code)
 	case -ENODEV:
 	case -EOPNOTSUPP:
 		return error_code;
+	case -ENOSPC:
+		return -EBUSY;
 	default:
 		return -EIO;
 	}

@@ -123,7 +123,7 @@ static void choke_drop_by_idx(struct Qdisc *sch, unsigned int idx,
 	if (idx == q->tail)
 		choke_zap_tail_holes(q);
 
-	--sch->q.qlen;
+	qdisc_qlen_dec(sch);
 	qdisc_qstats_backlog_dec(sch, skb);
 	qdisc_tree_reduce_backlog(sch, 1, qdisc_pkt_len(skb));
 	qdisc_drop(skb, sch, to_free);
@@ -271,7 +271,7 @@ static int choke_enqueue(struct sk_buff *skb, struct Qdisc *sch,
 	if (sch->q.qlen < q->limit) {
 		q->tab[q->tail] = skb;
 		q->tail = (q->tail + 1) & q->tab_mask;
-		++sch->q.qlen;
+		qdisc_qlen_inc(sch);
 		qdisc_qstats_backlog_inc(sch, skb);
 		return NET_XMIT_SUCCESS;
 	}
@@ -298,7 +298,7 @@ static struct sk_buff *choke_dequeue(struct Qdisc *sch)
 	skb = q->tab[q->head];
 	q->tab[q->head] = NULL;
 	choke_zap_head_holes(q);
-	--sch->q.qlen;
+	qdisc_qlen_dec(sch);
 	qdisc_qstats_backlog_dec(sch, skb);
 	qdisc_bstats_update(sch, skb);
 
@@ -374,7 +374,7 @@ static int choke_change(struct Qdisc *sch, struct nlattr *opt,
 	if (mask != q->tab_mask) {
 		struct sk_buff **ntab;
 
-		ntab = kvcalloc(mask + 1, sizeof(struct sk_buff *), GFP_KERNEL);
+		ntab = kvzalloc_objs(struct sk_buff *, mask + 1);
 		if (!ntab)
 			return -ENOMEM;
 
@@ -396,7 +396,7 @@ static int choke_change(struct Qdisc *sch, struct nlattr *opt,
 				}
 				dropped += qdisc_pkt_len(skb);
 				qdisc_qstats_backlog_dec(sch, skb);
-				--sch->q.qlen;
+				qdisc_qlen_dec(sch);
 				rtnl_qdisc_drop(skb, sch);
 			}
 			qdisc_tree_reduce_backlog(sch, oqlen - sch->q.qlen, dropped);

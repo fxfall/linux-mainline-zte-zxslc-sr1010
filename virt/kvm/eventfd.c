@@ -383,7 +383,7 @@ kvm_irqfd_assign(struct kvm *kvm, struct kvm_irqfd *args)
 	if (!kvm_arch_irqfd_allowed(kvm, args))
 		return -EINVAL;
 
-	irqfd = kzalloc(sizeof(*irqfd), GFP_KERNEL_ACCOUNT);
+	irqfd = kzalloc_obj(*irqfd, GFP_KERNEL_ACCOUNT);
 	if (!irqfd)
 		return -ENOMEM;
 
@@ -431,8 +431,7 @@ kvm_irqfd_assign(struct kvm *kvm, struct kvm_irqfd *args)
 		}
 
 		if (!irqfd->resampler) {
-			resampler = kzalloc(sizeof(*resampler),
-					    GFP_KERNEL_ACCOUNT);
+			resampler = kzalloc_obj(*resampler, GFP_KERNEL_ACCOUNT);
 			if (!resampler) {
 				ret = -ENOMEM;
 				mutex_unlock(&kvm->irqfds.resampler_lock);
@@ -712,7 +711,7 @@ bool kvm_notify_irqfd_resampler(struct kvm *kvm,
  */
 int kvm_irqfd_init(void)
 {
-	irqfd_cleanup_wq = alloc_workqueue("kvm-irqfd-cleanup", 0, 0);
+	irqfd_cleanup_wq = alloc_workqueue("kvm-irqfd-cleanup", WQ_PERCPU, 0);
 	if (!irqfd_cleanup_wq)
 		return -ENOMEM;
 
@@ -872,7 +871,7 @@ static int kvm_assign_ioeventfd_idx(struct kvm *kvm,
 	if (IS_ERR(eventfd))
 		return PTR_ERR(eventfd);
 
-	p = kzalloc(sizeof(*p), GFP_KERNEL_ACCOUNT);
+	p = kzalloc_obj(*p, GFP_KERNEL_ACCOUNT);
 	if (!p) {
 		ret = -ENOMEM;
 		goto fail;

@@ -21,6 +21,8 @@
 
 #define NET_SHAPER_ID_UNSPEC NET_SHAPER_ID_MASK
 
+static_assert(NET_SHAPER_ID_UNSPEC == NET_SHAPER_MAX_HANDLE_ID + 1);
+
 struct net_shaper_hierarchy {
 	struct xarray shapers;
 };
@@ -335,7 +337,7 @@ net_shaper_hierarchy_setup(struct net_shaper_binding *binding)
 	if (hierarchy)
 		return hierarchy;
 
-	hierarchy = kmalloc(sizeof(*hierarchy), GFP_KERNEL);
+	hierarchy = kmalloc_obj(*hierarchy);
 	if (!hierarchy)
 		return NULL;
 
@@ -376,7 +378,7 @@ static int net_shaper_pre_insert(struct net_shaper_binding *binding,
 	    handle->id == NET_SHAPER_ID_UNSPEC) {
 		u32 min, max;
 
-		handle->id = NET_SHAPER_ID_MASK - 1;
+		handle->id = NET_SHAPER_MAX_HANDLE_ID;
 		max = net_shaper_handle_to_index(handle);
 		handle->id = 0;
 		min = net_shaper_handle_to_index(handle);
@@ -392,7 +394,7 @@ static int net_shaper_pre_insert(struct net_shaper_binding *binding,
 		id_allocated = true;
 	}
 
-	cur = kzalloc(sizeof(*cur), GFP_KERNEL);
+	cur = kzalloc_obj(*cur);
 	if (!cur) {
 		ret = -ENOMEM;
 		goto free_id;
@@ -404,7 +406,7 @@ static int net_shaper_pre_insert(struct net_shaper_binding *binding,
 	prev = xa_store(&hierarchy->shapers, index, cur, GFP_KERNEL);
 	if (xa_err(prev)) {
 		NL_SET_ERR_MSG(extack, "Can't insert shaper into device store");
-		kfree_rcu(cur, rcu);
+		kfree(cur);
 		ret = xa_err(prev);
 		goto free_id;
 	}
@@ -427,7 +429,6 @@ static void net_shaper_commit(struct net_shaper_binding *binding,
 	int index;
 	int i;
 
-	xa_lock(&hierarchy->shapers);
 	for (i = 0; i < nr_shapers; ++i) {
 		index = net_shaper_handle_to_index(&shapers[i].handle);
 
@@ -440,7 +441,6 @@ static void net_shaper_commit(struct net_shaper_binding *binding,
 		/* ... publish to lockless readers. */
 		smp_store_release(&cur->valid, true);
 	}
-	xa_unlock(&hierarchy->shapers);
 }
 
 /* Rollback all the tentative inserts from the hierarchy. */
@@ -453,14 +453,12 @@ static void net_shaper_rollback(struct net_shaper_binding *binding)
 	if (!hierarchy)
 		return;
 
-	xa_lock(&hierarchy->shapers);
 	xa_for_each(&hierarchy->shapers, index, cur) {
 		if (cur->valid)
 			continue;
-		__xa_erase(&hierarchy->shapers, index);
+		xa_erase(&hierarchy->shapers, index);
 		kfree_rcu(cur, rcu);
 	}
-	xa_unlock(&hierarchy->shapers);
 }
 
 static int net_shaper_parse_handle(const struct nlattr *attr,
@@ -1171,8 +1169,7 @@ static int net_shaper_pre_del_node(struct net_shaper_binding *binding,
 			return -EINVAL;
 	}
 
-	leaves = kcalloc(shaper->leaves, sizeof(struct net_shaper),
-			 GFP_KERNEL);
+	leaves = kzalloc_objs(struct net_shaper, shaper->leaves);
 	if (!leaves)
 		return -ENOMEM;
 
@@ -1455,6 +1452,8 @@ int net_shaper_nl_cap_get_dumpit(struct sk_buff *skb,
 
 		ret = net_shaper_cap_fill_one(skb, binding, scope, flags,
 					      info);
+		/* cap dumps are tiny, we expect them to fit in a single skb */
+		WARN_ON_ONCE(ret == -EMSGSIZE);
 		if (ret)
 			return ret;
 	}
@@ -1471,12 +1470,14 @@ static void net_shaper_flush(struct net_shaper_binding *binding)
 	if (!hierarchy)
 		return;
 
-	xa_lock(&hierarchy->shapers);
 	xa_for_each(&hierarchy->shapers, index, cur) {
-		__xa_erase(&hierarchy->shapers, index);
+		xa_erase(&hierarchy->shapers, index);
+		/* No need to use kfree_rcu(), netdev is already unpublished,
+		 * and synchronize_rcu() has been run as part of
+		 * unregister_netdevice().
+		 */
 		kfree(cur);
 	}
-	xa_unlock(&hierarchy->shapers);
 
 	kfree(hierarchy);
 }

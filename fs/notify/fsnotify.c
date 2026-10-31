@@ -14,6 +14,9 @@
 #include <linux/fsnotify_backend.h>
 #include "fsnotify.h"
 
+#define CREATE_TRACE_POINTS
+#include <trace/events/fsnotify.h>
+
 /*
  * Clear all of the marks on an inode when it is being evicted from core
  */
@@ -33,65 +36,6 @@ void __fsnotify_mntns_delete(struct mnt_namespace *mntns)
 	fsnotify_clear_marks_by_mntns(mntns);
 }
 
-/**
- * fsnotify_unmount_inodes - an sb is unmounting.  handle any watched inodes.
- * @sb: superblock being unmounted.
- *
- * Called during unmount with no locks held, so needs to be safe against
- * concurrent modifiers. We temporarily drop sb->s_inode_list_lock and CAN block.
- */
-static void fsnotify_unmount_inodes(struct super_block *sb)
-{
-	struct inode *inode, *iput_inode = NULL;
-
-	spin_lock(&sb->s_inode_list_lock);
-	list_for_each_entry(inode, &sb->s_inodes, i_sb_list) {
-		/*
-		 * We cannot __iget() an inode in state I_FREEING,
-		 * I_WILL_FREE, or I_NEW which is fine because by that point
-		 * the inode cannot have any associated watches.
-		 */
-		spin_lock(&inode->i_lock);
-		if (inode->i_state & (I_FREEING|I_WILL_FREE|I_NEW)) {
-			spin_unlock(&inode->i_lock);
-			continue;
-		}
-
-		/*
-		 * If i_count is zero, the inode cannot have any watches and
-		 * doing an __iget/iput with SB_ACTIVE clear would actually
-		 * evict all inodes with zero i_count from icache which is
-		 * unnecessarily violent and may in fact be illegal to do.
-		 * However, we should have been called /after/ evict_inodes
-		 * removed all zero refcount inodes, in any case.  Test to
-		 * be sure.
-		 */
-		if (!icount_read(inode)) {
-			spin_unlock(&inode->i_lock);
-			continue;
-		}
-
-		__iget(inode);
-		spin_unlock(&inode->i_lock);
-		spin_unlock(&sb->s_inode_list_lock);
-
-		iput(iput_inode);
-
-		/* for each watch, send FS_UNMOUNT and then remove it */
-		fsnotify_inode(inode, FS_UNMOUNT);
-
-		fsnotify_inode_delete(inode);
-
-		iput_inode = inode;
-
-		cond_resched();
-		spin_lock(&sb->s_inode_list_lock);
-	}
-	spin_unlock(&sb->s_inode_list_lock);
-
-	iput(iput_inode);
-}
-
 void fsnotify_sb_delete(struct super_block *sb)
 {
 	struct fsnotify_sb_info *sbinfo = fsnotify_sb_info(sb);
@@ -100,7 +44,7 @@ void fsnotify_sb_delete(struct super_block *sb)
 	if (!sbinfo)
 		return;
 
-	fsnotify_unmount_inodes(sb);
+	fsnotify_unmount_inodes(sbinfo);
 	fsnotify_clear_marks_by_sb(sb);
 	/* Wait for outstanding object references from connectors */
 	wait_var_event(fsnotify_sb_watched_objects(sb),
@@ -112,7 +56,10 @@ void fsnotify_sb_delete(struct super_block *sb)
 
 void fsnotify_sb_free(struct super_block *sb)
 {
-	kfree(sb->s_fsnotify_info);
+	if (sb->s_fsnotify_info) {
+		WARN_ON_ONCE(!list_empty(&sb->s_fsnotify_info->inode_conn_list));
+		kfree(sb->s_fsnotify_info);
+	}
 }
 
 /*
@@ -132,7 +79,7 @@ void fsnotify_set_children_dentry_flags(struct inode *inode)
 	spin_lock(&inode->i_lock);
 	/* run all of the dentries associated with this inode.  Since this is a
 	 * directory, there damn well better only be one item on this list */
-	hlist_for_each_entry(alias, &inode->i_dentry, d_u.d_alias) {
+	for_each_alias(alias, inode) {
 		struct dentry *child;
 
 		/* run all of the children of the original inode and fix their
@@ -560,6 +507,8 @@ int fsnotify(__u32 mask, const void *data, int data_type, struct inode *dir,
 	int ret = 0;
 	__u32 test_mask, marks_mask = 0;
 
+	trace_fsnotify(mask, data, data_type, dir, file_name, inode, cookie);
+
 	if (path)
 		mnt = real_mount(path->mnt);
 
@@ -777,8 +726,7 @@ static __init int fsnotify_init(void)
 	if (ret)
 		panic("initializing fsnotify_mark_srcu");
 
-	fsnotify_mark_connector_cachep = KMEM_CACHE(fsnotify_mark_connector,
-						    SLAB_PANIC);
+	fsnotify_init_connector_caches();
 
 	return 0;
 }

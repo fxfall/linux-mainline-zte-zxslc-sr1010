@@ -5,12 +5,16 @@
 //!
 //! C header: [`include/linux/ioport.h`](srctree/include/linux/ioport.h)
 
-use core::ops::Deref;
-use core::ptr::NonNull;
+use core::{
+    ops::Deref,
+    ptr::NonNull, //
+};
 
-use crate::prelude::*;
-use crate::str::{CStr, CString};
-use crate::types::Opaque;
+use crate::{
+    prelude::*,
+    str::CString,
+    types::Opaque, //
+};
 
 pub use super::{
     PhysAddr,
@@ -225,7 +229,7 @@ impl Flags {
     // Always inline to optimize out error path of `build_assert`.
     #[inline(always)]
     const fn new(value: u32) -> Self {
-        crate::build_assert!(value as u64 <= c_ulong::MAX as u64);
+        build_assert!(value as u64 <= c_ulong::MAX as u64);
         Flags(value as c_ulong)
     }
 }

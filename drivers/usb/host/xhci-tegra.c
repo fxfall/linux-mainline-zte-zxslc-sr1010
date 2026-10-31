@@ -6,6 +6,7 @@
  * Copyright (C) 2014 Google, Inc.
  */
 
+#include <linux/bitfield.h>
 #include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
@@ -293,6 +294,7 @@ struct tegra_xusb {
 	struct reset_control *host_rst;
 	struct reset_control *ss_rst;
 
+	struct tegra_pmc *pmc;
 	struct device *genpd_dev_host;
 	struct device *genpd_dev_ss;
 	bool use_genpd;
@@ -992,7 +994,7 @@ static int tegra_xusb_wait_for_falcon(struct tegra_xusb *tegra)
 	u32 value;
 
 	cap_regs = tegra->regs;
-	op_regs = tegra->regs + HC_LENGTH(readl(&cap_regs->hc_capbase));
+	op_regs = tegra->regs + FIELD_GET(HC_LENGTH, readl(&cap_regs->hc_capbase)),
 
 	ret = readl_poll_timeout(&op_regs->status, value, !(value & STS_CNR), 1000, 200000);
 
@@ -1189,20 +1191,23 @@ static int tegra_xusb_unpowergate_partitions(struct tegra_xusb *tegra)
 			return rc;
 		}
 	} else {
-		rc = tegra_powergate_sequence_power_up(TEGRA_POWERGATE_XUSBA,
-							tegra->ss_clk,
-							tegra->ss_rst);
+		rc = tegra_pmc_powergate_sequence_power_up(tegra->pmc,
+							   TEGRA_POWERGATE_XUSBA,
+							   tegra->ss_clk,
+							   tegra->ss_rst);
 		if (rc < 0) {
 			dev_err(dev, "failed to enable XUSB SS partition\n");
 			return rc;
 		}
 
-		rc = tegra_powergate_sequence_power_up(TEGRA_POWERGATE_XUSBC,
-							tegra->host_clk,
-							tegra->host_rst);
+		rc = tegra_pmc_powergate_sequence_power_up(tegra->pmc,
+							   TEGRA_POWERGATE_XUSBC,
+							   tegra->host_clk,
+							   tegra->host_rst);
 		if (rc < 0) {
 			dev_err(dev, "failed to enable XUSB Host partition\n");
-			tegra_powergate_power_off(TEGRA_POWERGATE_XUSBA);
+			tegra_pmc_powergate_power_off(tegra->pmc,
+						      TEGRA_POWERGATE_XUSBA);
 			return rc;
 		}
 	}
@@ -1229,18 +1234,21 @@ static int tegra_xusb_powergate_partitions(struct tegra_xusb *tegra)
 			return rc;
 		}
 	} else {
-		rc = tegra_powergate_power_off(TEGRA_POWERGATE_XUSBC);
+		rc = tegra_pmc_powergate_power_off(tegra->pmc,
+						   TEGRA_POWERGATE_XUSBC);
 		if (rc < 0) {
 			dev_err(dev, "failed to disable XUSB Host partition\n");
 			return rc;
 		}
 
-		rc = tegra_powergate_power_off(TEGRA_POWERGATE_XUSBA);
+		rc = tegra_pmc_powergate_power_off(tegra->pmc,
+						   TEGRA_POWERGATE_XUSBA);
 		if (rc < 0) {
 			dev_err(dev, "failed to disable XUSB SS partition\n");
-			tegra_powergate_sequence_power_up(TEGRA_POWERGATE_XUSBC,
-							  tegra->host_clk,
-							  tegra->host_rst);
+			tegra_pmc_powergate_sequence_power_up(tegra->pmc,
+							      TEGRA_POWERGATE_XUSBC,
+							      tegra->host_clk,
+							      tegra->host_rst);
 			return rc;
 		}
 	}
@@ -1353,13 +1361,9 @@ static void tegra_xhci_id_work(struct work_struct *work)
 	struct tegra_xusb_mbox_msg msg;
 	struct phy *phy = tegra_xusb_get_phy(tegra, "usb2",
 						    tegra->otg_usb2_port);
-	bool host_mode;
+	bool host_mode = tegra->host_mode;
 	u32 status;
 	int ret;
-
-	mutex_lock(&tegra->lock);
-
-	host_mode = tegra->host_mode;
 
 	dev_dbg(tegra->dev, "host mode %s\n", str_on_off(host_mode));
 
@@ -1367,8 +1371,6 @@ static void tegra_xhci_id_work(struct work_struct *work)
 		phy_set_mode_ext(phy, PHY_MODE_USB_OTG, USB_ROLE_HOST);
 	else
 		phy_set_mode_ext(phy, PHY_MODE_USB_OTG, USB_ROLE_NONE);
-
-	mutex_unlock(&tegra->lock);
 
 	tegra->otg_usb3_port = tegra_xusb_padctl_get_usb3_companion(tegra->padctl,
 								    tegra->otg_usb2_port);
@@ -1404,7 +1406,6 @@ static void tegra_xhci_id_work(struct work_struct *work)
 			}
 
 			tegra_xhci_set_port_power(tegra, true, true);
-			pm_runtime_mark_last_busy(tegra->dev);
 
 		} else {
 			if (tegra->otg_usb3_port >= 0)
@@ -1744,6 +1745,13 @@ static int tegra_xusb_probe(struct platform_device *pdev)
 				err);
 			goto put_padctl;
 		}
+
+		tegra->pmc = devm_tegra_pmc_get(&pdev->dev);
+		if (IS_ERR(tegra->pmc)) {
+			err = dev_err_probe(&pdev->dev, PTR_ERR(tegra->pmc),
+					    "failed to get PMC\n");
+			goto put_padctl;
+		}
 	} else {
 		err = tegra_xusb_powerdomain_init(&pdev->dev, tegra);
 		if (err)
@@ -1888,7 +1896,7 @@ static int tegra_xusb_probe(struct platform_device *pdev)
 		goto remove_usb2;
 	}
 
-	if (HCC_MAX_PSA(xhci->hcc_params) >= 4)
+	if (GET_MAX_PSA_SIZE(xhci->hcc_params) >= 4)
 		xhci->shared_hcd->can_do_streams = 1;
 
 	err = usb_add_hcd(xhci->shared_hcd, tegra->xhci_irq, IRQF_SHARED);
@@ -2025,7 +2033,7 @@ static bool xhci_hub_ports_suspended(struct xhci_hub *hub)
 	u32 value;
 
 	for (i = 0; i < hub->num_ports; i++) {
-		value = readl(hub->ports[i]->addr);
+		value = xhci_portsc_readl(hub->ports[i]);
 		if ((value & PORT_PE) == 0)
 			continue;
 
@@ -2151,7 +2159,7 @@ static void tegra_xhci_enable_phy_sleepwalk_wake(struct tegra_xusb *tegra)
 			if (!is_host_mode_phy(tegra, i, j))
 				continue;
 
-			portsc = readl(rhub->ports[index]->addr);
+			portsc = xhci_portsc_readl(rhub->ports[index]);
 			speed = tegra_xhci_portsc_to_speed(tegra, portsc);
 			tegra_xusb_padctl_enable_phy_sleepwalk(padctl, phy, speed);
 			tegra_xusb_padctl_enable_phy_wake(padctl, phy);
@@ -2246,7 +2254,7 @@ static int tegra_xusb_enter_elpg(struct tegra_xusb *tegra, bool is_auto_resume)
 	for (i = 0; i < xhci->usb2_rhub.num_ports; i++) {
 		if (!xhci->usb2_rhub.ports[i])
 			continue;
-		portsc = readl(xhci->usb2_rhub.ports[i]->addr);
+		portsc = xhci_portsc_readl(xhci->usb2_rhub.ports[i]);
 		tegra->lp0_utmi_pad_mask &= ~BIT(i);
 		if (((portsc & PORT_PLS_MASK) == XDEV_U3) || ((portsc & DEV_SPEED_MASK) == XDEV_FS))
 			tegra->lp0_utmi_pad_mask |= BIT(i);
@@ -2574,7 +2582,9 @@ static const struct tegra_xusb_soc tegra124_soc = {
 		.smi_intr = XUSB_CFG_ARU_SMI_INTR,
 	},
 };
+#if IS_ENABLED(CONFIG_ARCH_TEGRA_124_SOC) || IS_ENABLED(CONFIG_ARCH_TEGRA_132_SOC)
 MODULE_FIRMWARE("nvidia/tegra124/xusb.bin");
+#endif
 
 static const char * const tegra210_supply_names[] = {
 	"dvddio-pex",
@@ -2613,11 +2623,15 @@ static const struct tegra_xusb_soc tegra210_soc = {
 		.smi_intr = XUSB_CFG_ARU_SMI_INTR,
 	},
 };
+#if IS_ENABLED(CONFIG_ARCH_TEGRA_210_SOC)
 MODULE_FIRMWARE("nvidia/tegra210/xusb.bin");
+#endif
 
 static const char * const tegra186_supply_names[] = {
 };
+#if IS_ENABLED(CONFIG_ARCH_TEGRA_186_SOC)
 MODULE_FIRMWARE("nvidia/tegra186/xusb.bin");
+#endif
 
 static const struct tegra_xusb_phy_type tegra186_phy_types[] = {
 	{ .name = "usb3", .num = 3, },
@@ -2692,7 +2706,9 @@ static const struct tegra_xusb_soc tegra194_soc = {
 	},
 	.lpm_support = true,
 };
+#if IS_ENABLED(CONFIG_ARCH_TEGRA_194_SOC)
 MODULE_FIRMWARE("nvidia/tegra194/xusb.bin");
+#endif
 
 static const struct tegra_xusb_soc_ops tegra234_ops = {
 	.mbox_reg_readl = &bar2_readl,
@@ -2784,7 +2800,7 @@ static int tegra_xhci_hub_control(struct usb_hcd *hcd, u16 type_req, u16 value, 
 		while (i--) {
 			if (!test_bit(i, &bus_state->resuming_ports))
 				continue;
-			portsc = readl(ports[i]->addr);
+			portsc = xhci_portsc_readl(ports[i]);
 			if ((portsc & PORT_PLS_MASK) == XDEV_RESUME)
 				tegra_phy_xusb_utmi_pad_power_on(
 					tegra_xusb_get_phy(tegra, "usb2", (int) i));
@@ -2802,7 +2818,7 @@ static int tegra_xhci_hub_control(struct usb_hcd *hcd, u16 type_req, u16 value, 
 			if (!index || index > rhub->num_ports)
 				return -EPIPE;
 			ports = rhub->ports;
-			portsc = readl(ports[port]->addr);
+			portsc = xhci_portsc_readl(ports[port]);
 			if (portsc & PORT_CONNECT)
 				tegra_phy_xusb_utmi_pad_power_on(phy);
 		}
@@ -2821,7 +2837,7 @@ static int tegra_xhci_hub_control(struct usb_hcd *hcd, u16 type_req, u16 value, 
 
 		if ((type_req == ClearPortFeature) && (value == USB_PORT_FEAT_C_CONNECTION)) {
 			ports = rhub->ports;
-			portsc = readl(ports[port]->addr);
+			portsc = xhci_portsc_readl(ports[port]);
 			if (!(portsc & PORT_CONNECT)) {
 				/* We don't suspend the PAD while HNP role swap happens on the OTG
 				 * port

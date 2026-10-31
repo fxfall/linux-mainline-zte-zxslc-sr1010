@@ -83,7 +83,7 @@ static struct cxl_nvdimm_bridge *cxl_nvdimm_bridge_alloc(struct cxl_port *port)
 	struct device *dev;
 	int rc;
 
-	cxl_nvb = kzalloc(sizeof(*cxl_nvb), GFP_KERNEL);
+	cxl_nvb = kzalloc_obj(*cxl_nvb);
 	if (!cxl_nvb)
 		return ERR_PTR(-ENOMEM);
 
@@ -205,7 +205,7 @@ static struct cxl_nvdimm *cxl_nvdimm_alloc(struct cxl_nvdimm_bridge *cxl_nvb,
 	struct cxl_nvdimm *cxl_nvd;
 	struct device *dev;
 
-	cxl_nvd = kzalloc(sizeof(*cxl_nvd), GFP_KERNEL);
+	cxl_nvd = kzalloc_obj(*cxl_nvd);
 	if (!cxl_nvd)
 		return ERR_PTR(-ENOMEM);
 
@@ -219,12 +219,14 @@ static struct cxl_nvdimm *cxl_nvdimm_alloc(struct cxl_nvdimm_bridge *cxl_nvb,
 	dev->bus = &cxl_bus_type;
 	dev->type = &cxl_nvdimm_type;
 	/*
-	 * A "%llx" string is 17-bytes vs dimm_id that is max
-	 * NVDIMM_KEY_DESC_LEN
+	 * dev_id is the nvdimm dimm_id used for security key lookup.
+	 * It must match id_show(), which emits the CXL serial as an
+	 * unsigned decimal. A u64 decimal string is at most 20 digits
+	 * plus NUL.
 	 */
-	BUILD_BUG_ON(sizeof(cxl_nvd->dev_id) < 17 ||
+	BUILD_BUG_ON(sizeof(cxl_nvd->dev_id) < 21 ||
 		     sizeof(cxl_nvd->dev_id) > NVDIMM_KEY_DESC_LEN);
-	sprintf(cxl_nvd->dev_id, "%llx", cxlmd->cxlds->serial);
+	sprintf(cxl_nvd->dev_id, "%llu", cxlmd->cxlds->serial);
 
 	return cxl_nvd;
 }
@@ -244,12 +246,13 @@ static void cxlmd_release_nvdimm(void *_cxlmd)
 
 /**
  * devm_cxl_add_nvdimm() - add a bridge between a cxl_memdev and an nvdimm
- * @parent_port: parent port for the (to be added) @cxlmd endpoint port
- * @cxlmd: cxl_memdev instance that will perform LIBNVDIMM operations
+ * @host: host device for devm operations
+ * @port: any port in the CXL topology to find the nvdimm-bridge device
+ * @cxlmd: parent of the to be created cxl_nvdimm device
  *
  * Return: 0 on success negative error code on failure.
  */
-int devm_cxl_add_nvdimm(struct cxl_port *parent_port,
+int devm_cxl_add_nvdimm(struct device *host, struct cxl_port *port,
 			struct cxl_memdev *cxlmd)
 {
 	struct cxl_nvdimm_bridge *cxl_nvb;
@@ -257,7 +260,7 @@ int devm_cxl_add_nvdimm(struct cxl_port *parent_port,
 	struct device *dev;
 	int rc;
 
-	cxl_nvb = cxl_find_nvdimm_bridge(parent_port);
+	cxl_nvb = cxl_find_nvdimm_bridge(port);
 	if (!cxl_nvb)
 		return -ENODEV;
 
@@ -292,10 +295,10 @@ int devm_cxl_add_nvdimm(struct cxl_port *parent_port,
 	if (rc)
 		goto err;
 
-	dev_dbg(&cxlmd->dev, "register %s\n", dev_name(dev));
+	dev_dbg(host, "register %s\n", dev_name(dev));
 
 	/* @cxlmd carries a reference on @cxl_nvb until cxlmd_release_nvdimm */
-	return devm_add_action_or_reset(&cxlmd->dev, cxlmd_release_nvdimm, cxlmd);
+	return devm_add_action_or_reset(host, cxlmd_release_nvdimm, cxlmd);
 
 err:
 	put_device(dev);

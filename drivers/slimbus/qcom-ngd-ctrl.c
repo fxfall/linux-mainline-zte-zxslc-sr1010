@@ -463,7 +463,7 @@ static int qcom_slim_qmi_init(struct qcom_slim_ngd_ctrl *ctrl,
 	}
 
 	rc = kernel_connect(handle->sock,
-				(struct sockaddr *)&ctrl->qmi.svc_info,
+				(struct sockaddr_unsized *)&ctrl->qmi.svc_info,
 				sizeof(ctrl->qmi.svc_info), 0);
 	if (rc < 0) {
 		dev_err(ctrl->dev, "Remote Service connect failed: %d\n", rc);
@@ -1511,26 +1511,22 @@ static int of_qcom_slim_ngd_register(struct device *parent,
 	const struct ngd_reg_offset_data *data;
 	struct qcom_slim_ngd *ngd;
 	const struct of_device_id *match;
-	struct device_node *node;
 	u32 id;
 	int ret;
 
 	match = of_match_node(qcom_slim_ngd_dt_match, parent->of_node);
 	data = match->data;
-	for_each_available_child_of_node(parent->of_node, node) {
+	for_each_available_child_of_node_scoped(parent->of_node, node) {
 		if (of_property_read_u32(node, "reg", &id))
 			continue;
 
-		ngd = kzalloc(sizeof(*ngd), GFP_KERNEL);
-		if (!ngd) {
-			of_node_put(node);
+		ngd = kzalloc_obj(*ngd);
+		if (!ngd)
 			return -ENOMEM;
-		}
 
 		ngd->pdev = platform_device_alloc(QCOM_SLIM_NGD_DRV_NAME, id);
 		if (!ngd->pdev) {
 			kfree(ngd);
-			of_node_put(node);
 			return -ENOMEM;
 		}
 		ngd->id = id;
@@ -1541,17 +1537,15 @@ static int of_qcom_slim_ngd_register(struct device *parent,
 		if (ret) {
 			platform_device_put(ngd->pdev);
 			kfree(ngd);
-			of_node_put(node);
 			return ret;
 		}
-		ngd->pdev->dev.of_node = of_node_get(node);
+		platform_device_set_of_node(ngd->pdev, node);
 		ctrl->ngd = ngd;
 
 		ret = platform_device_add(ngd->pdev);
 		if (ret) {
 			platform_device_put(ngd->pdev);
 			kfree(ngd);
-			of_node_put(node);
 			return ret;
 		}
 		ngd->base = ctrl->base + ngd->id * data->offset +

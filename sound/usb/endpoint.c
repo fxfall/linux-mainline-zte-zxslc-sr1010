@@ -385,13 +385,15 @@ static int prepare_inbound_urb(struct snd_usb_endpoint *ep,
 	case SND_USB_ENDPOINT_TYPE_DATA:
 		offs = 0;
 		for (i = 0; i < urb_ctx->packets; i++) {
+			if (offs + ep->curpacksize > urb_ctx->buffer_size)
+				break;
 			urb->iso_frame_desc[i].offset = offs;
 			urb->iso_frame_desc[i].length = ep->curpacksize;
 			offs += ep->curpacksize;
 		}
 
 		urb->transfer_buffer_length = offs;
-		urb->number_of_packets = urb_ctx->packets;
+		urb->number_of_packets = i;
 		break;
 
 	case SND_USB_ENDPOINT_TYPE_SYNC:
@@ -403,18 +405,21 @@ static int prepare_inbound_urb(struct snd_usb_endpoint *ep,
 }
 
 /* notify an error as XRUN to the assigned PCM data substream */
-static void notify_xrun(struct snd_usb_endpoint *ep)
+static bool notify_xrun(struct snd_usb_endpoint *ep)
 {
 	struct snd_usb_substream *data_subs;
 	struct snd_pcm_substream *psubs;
 
 	data_subs = READ_ONCE(ep->data_subs);
 	if (!data_subs)
-		return;
+		return false;
 	psubs = data_subs->pcm_substream;
 	if (psubs && psubs->runtime &&
-	    psubs->runtime->state == SNDRV_PCM_STATE_RUNNING)
+	    psubs->runtime->state == SNDRV_PCM_STATE_RUNNING) {
 		snd_pcm_stop_xrun(psubs);
+		return true;
+	}
+	return false;
 }
 
 static struct snd_usb_packet_info *
@@ -444,7 +449,9 @@ static void push_back_to_ready_list(struct snd_usb_endpoint *ep,
 				    struct snd_urb_ctx *ctx)
 {
 	guard(spinlock_irqsave)(&ep->lock);
-	list_add_tail(&ctx->ready_list, &ep->ready_playback_urbs);
+	/* ctx may still be linked: a stale completion racing a stop/restart. */
+	if (list_empty(&ctx->ready_list))
+		list_add_tail(&ctx->ready_list, &ep->ready_playback_urbs);
 }
 
 /*
@@ -468,7 +475,7 @@ int snd_usb_queue_pending_output_urbs(struct snd_usb_endpoint *ep,
 	while (ep_state_running(ep)) {
 		struct snd_usb_packet_info *packet;
 		struct snd_urb_ctx *ctx = NULL;
-		int err, i;
+		int err;
 
 		scoped_guard(spinlock_irqsave, &ep->lock) {
 			if ((!implicit_fb || ep->next_packet_queued > 0) &&
@@ -487,9 +494,10 @@ int snd_usb_queue_pending_output_urbs(struct snd_usb_endpoint *ep,
 
 		/* copy over the length information */
 		if (implicit_fb) {
-			ctx->packets = packet->packets;
-			for (i = 0; i < packet->packets; i++)
-				ctx->packet_size[i] = packet->packet_size[i];
+			ctx->packets = min_t(int, packet->packets,
+					     ep->max_urb_packs);
+			memcpy(ctx->packet_size, packet->packet_size,
+			       ctx->packets * sizeof(packet->packet_size[0]));
 		}
 
 		/* call the data handler to fill in playback data */
@@ -595,8 +603,9 @@ static void snd_complete_urb(struct urb *urb)
 		return;
 
 	if (!atomic_read(&ep->chip->shutdown)) {
-		usb_audio_err(ep->chip, "cannot submit urb (err = %d)\n", err);
-		notify_xrun(ep);
+		if (notify_xrun(ep))
+			usb_audio_err(ep->chip,
+				      "cannot submit urb (err = %d)\n", err);
 	}
 
 exit_clear:
@@ -618,7 +627,7 @@ iface_ref_find(struct snd_usb_audio *chip, int iface)
 		if (ip->iface == iface)
 			return ip;
 
-	ip = kzalloc(sizeof(*ip), GFP_KERNEL);
+	ip = kzalloc_obj(*ip);
 	if (!ip)
 		return NULL;
 	ip->iface = iface;
@@ -636,7 +645,7 @@ clock_ref_find(struct snd_usb_audio *chip, int clock)
 		if (ref->clock == clock)
 			return ref;
 
-	ref = kzalloc(sizeof(*ref), GFP_KERNEL);
+	ref = kzalloc_obj(*ref);
 	if (!ref)
 		return NULL;
 	ref->clock = clock;
@@ -695,7 +704,7 @@ int snd_usb_add_endpoint(struct snd_usb_audio *chip, int ep_num, int type)
 	usb_audio_dbg(chip, "Creating new %s endpoint #%x\n",
 		      ep_type_name(type),
 		      ep_num);
-	ep = kzalloc(sizeof(*ep), GFP_KERNEL);
+	ep = kzalloc_obj(*ep);
 	if (!ep)
 		return -ENOMEM;
 
@@ -1030,6 +1039,7 @@ void snd_usb_endpoint_sync_pending_stop(struct snd_usb_endpoint *ep)
  */
 static int stop_urbs(struct snd_usb_endpoint *ep, bool force, bool keep_pending)
 {
+	struct snd_urb_ctx *ctx, *n;
 	unsigned int i;
 
 	if (!force && atomic_read(&ep->running))
@@ -1039,7 +1049,9 @@ static int stop_urbs(struct snd_usb_endpoint *ep, bool force, bool keep_pending)
 		return 0;
 
 	scoped_guard(spinlock_irqsave, &ep->lock) {
-		INIT_LIST_HEAD(&ep->ready_playback_urbs);
+		/* Unlink each ctx; INIT_LIST_HEAD() alone would leave them looking linked. */
+		list_for_each_entry_safe(ctx, n, &ep->ready_playback_urbs, ready_list)
+			list_del_init(&ctx->ready_list);
 		ep->next_packet_head = 0;
 		ep->next_packet_queued = 0;
 	}
@@ -1164,10 +1176,12 @@ static int data_ep_set_params(struct snd_usb_endpoint *ep)
 				<< (16 - ep->datainterval);
 	}
 
-	if (ep->fill_max)
+	if (ep->fill_max) {
 		ep->curpacksize = ep->maxpacksize;
-	else
+		maxsize = ep->curpacksize;
+	} else {
 		ep->curpacksize = maxsize;
+	}
 
 	if (snd_usb_get_speed(chip->dev) != USB_SPEED_FULL) {
 		packs_per_ms = 8 >> ep->datainterval;
@@ -1228,8 +1242,15 @@ static int data_ep_set_params(struct snd_usb_endpoint *ep)
 		/* try to use enough URBs to contain an entire ALSA buffer */
 		max_urbs = min((unsigned) MAX_URBS,
 				MAX_QUEUE * packs_per_ms / urb_packs);
-		ep->nurbs = min(max_urbs, urbs_per_period * ep->cur_buffer_periods);
+		if (chip->quirk_flags & QUIRK_FLAG_PLAYBACK_URB_FIXUP)
+			ep->nurbs = MAX_URBS;
+		else
+			ep->nurbs = min(max_urbs, urbs_per_period * ep->cur_buffer_periods);
 	}
+
+	if (fmt->fmt_type == UAC_FORMAT_TYPE_II)
+		urb_packs++; /* for transfer delimiter */
+	ep->max_urb_packs = urb_packs;
 
 	/* allocate and initialize data urbs */
 	for (i = 0; i < ep->nurbs; i++) {
@@ -1238,9 +1259,6 @@ static int data_ep_set_params(struct snd_usb_endpoint *ep)
 		u->ep = ep;
 		u->packets = urb_packs;
 		u->buffer_size = maxsize * u->packets;
-
-		if (fmt->fmt_type == UAC_FORMAT_TYPE_II)
-			u->packets++; /* for transfer delimiter */
 		u->urb = usb_alloc_urb(u->packets, GFP_KERNEL);
 		if (!u->urb)
 			goto out_of_memory;
@@ -1252,6 +1270,8 @@ static int data_ep_set_params(struct snd_usb_endpoint *ep)
 			goto out_of_memory;
 		u->urb->pipe = ep->pipe;
 		u->urb->transfer_flags = URB_NO_TRANSFER_DMA_MAP;
+		if (chip->quirk_flags & QUIRK_FLAG_PLAYBACK_URB_FIXUP)
+			u->urb->transfer_flags |= URB_ISO_ASAP;
 		u->urb->interval = 1 << ep->datainterval;
 		u->urb->context = u;
 		u->urb->complete = snd_complete_urb;
@@ -1491,15 +1511,15 @@ int snd_usb_endpoint_prepare(struct snd_usb_audio *chip,
 			return err;
 	}
 
+	err = snd_usb_select_mode_quirk(chip, ep->cur_audiofmt);
+	if (err < 0)
+		return err;
+
 	err = snd_usb_init_pitch(chip, ep->cur_audiofmt);
 	if (err < 0)
 		return err;
 
 	err = init_sample_rate(chip, ep);
-	if (err < 0)
-		return err;
-
-	err = snd_usb_select_mode_quirk(chip, ep->cur_audiofmt);
 	if (err < 0)
 		return err;
 
@@ -1776,17 +1796,26 @@ static void snd_usb_handle_sync_urb(struct snd_usb_endpoint *ep,
 		/*
 		 * skip empty packets. At least M-Audio's Fast Track Ultra stops
 		 * streaming once it received a 0-byte OUT URB
+		 *
+		 * However, on devices where bytes==0 means every sync-source
+		 * packet errored (e.g. Behringer Flow 8 returning -EXDEV bursts
+		 * for entire capture URBs), an unconditional return starves the
+		 * IFB-fed OUT ring permanently. Such devices set
+		 * QUIRK_FLAG_IFB_SILENCE_ON_EMPTY to fall through and enqueue a
+		 * packet_info with size 0 packets, so playback emits silence
+		 * and the OUT ring keeps moving.
 		 */
-		if (bytes == 0)
+		if (bytes == 0 && !(ep->chip->quirk_flags & QUIRK_FLAG_IFB_SILENCE_ON_EMPTY))
 			return;
 
 		spin_lock_irqsave(&ep->lock, flags);
 		if (ep->next_packet_queued >= ARRAY_SIZE(ep->next_packet)) {
 			spin_unlock_irqrestore(&ep->lock, flags);
-			usb_audio_err(ep->chip,
-				      "next package FIFO overflow EP 0x%x\n",
-				      ep->ep_num);
-			notify_xrun(ep);
+			if (notify_xrun(ep)) {
+				usb_audio_err(ep->chip,
+					      "next packet FIFO overflow EP 0x%x\n",
+					      ep->ep_num);
+			}
 			return;
 		}
 
@@ -1804,11 +1833,13 @@ static void snd_usb_handle_sync_urb(struct snd_usb_endpoint *ep,
 
 		out_packet->packets = in_ctx->packets;
 		for (i = 0; i < in_ctx->packets; i++) {
-			if (urb->iso_frame_desc[i].status == 0)
-				out_packet->packet_size[i] =
+			if (urb->iso_frame_desc[i].status == 0) {
+				unsigned int frames =
 					urb->iso_frame_desc[i].actual_length / sender->stride;
-			else
+				out_packet->packet_size[i] = min(frames, ep->maxframesize);
+			} else {
 				out_packet->packet_size[i] = 0;
+			}
 		}
 
 		spin_unlock_irqrestore(&ep->lock, flags);

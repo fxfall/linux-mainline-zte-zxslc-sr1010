@@ -2,10 +2,10 @@
  * JFFS2 -- Journalling Flash File System, Version 2.
  *
  * Copyright © 2001-2007 Red Hat, Inc.
- * Copyright © 2004 Thomas Gleixner <tglx@linutronix.de>
+ * Copyright © 2004 Thomas Gleixner <tglx@kernel.org>
  *
  * Created by David Woodhouse <dwmw2@infradead.org>
- * Modified debugged and enhanced by Thomas Gleixner <tglx@linutronix.de>
+ * Modified debugged and enhanced by Thomas Gleixner <tglx@kernel.org>
  *
  * For licensing information, see the file 'LICENCE' in this directory.
  *
@@ -92,7 +92,7 @@ static void jffs2_wbuf_dirties_inode(struct jffs2_sb_info *c, uint32_t ino)
 	if (jffs2_wbuf_pending_for_ino(c, ino))
 		return;
 
-	new = kmalloc(sizeof(*new), GFP_KERNEL);
+	new = kmalloc_obj(*new);
 	if (!new) {
 		jffs2_dbg(1, "No memory to allocate inodirty. Fallback to all considered dirty\n");
 		jffs2_clear_wbuf_ino_list(c);
@@ -1177,7 +1177,7 @@ void jffs2_dirty_trigger(struct jffs2_sb_info *c)
 		return;
 
 	delay = msecs_to_jiffies(dirty_writeback_interval * 10);
-	if (queue_delayed_work(system_long_wq, &c->wbuf_dwork, delay))
+	if (queue_delayed_work(system_dfl_long_wq, &c->wbuf_dwork, delay))
 		jffs2_dbg(1, "%s()\n", __func__);
 }
 
@@ -1186,20 +1186,8 @@ int jffs2_nand_flash_setup(struct jffs2_sb_info *c)
 	if (!c->mtd->oobsize)
 		return 0;
 
-	if (c->mtd->program_once) {
-		/*
-		 * The OOB cannot be programmed apart from the data, so the clean
-		 * marker is a node in the data area. It takes the whole first
-		 * page: the first node of the block then starts on the next
-		 * page, and no page is programmed twice.
-		 */
-		c->cleanmarker_size = c->mtd->writesize;
-		pr_info("NAND pages can be programmed once: clean markers are in the data, %u bytes\n",
-			c->cleanmarker_size);
-	} else {
-		/* Cleanmarker is out-of-band, so inline size zero */
-		c->cleanmarker_size = 0;
-	}
+	/* Cleanmarker is out-of-band, so inline size zero */
+	c->cleanmarker_size = 0;
 
 	if (c->mtd->oobavail == 0) {
 		pr_err("inconsistent device description\n");

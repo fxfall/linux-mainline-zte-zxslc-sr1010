@@ -21,7 +21,7 @@ DESCRIPTION
 The **rtla timerlat top** displays a summary of the periodic output
 from the *timerlat* tracer. It also provides information for each
 operating system noise via the **osnoise:** tracepoints that can be
-seem with the option **-T**.
+seen with the option **-T**.
 
 OPTIONS
 =======
@@ -127,7 +127,7 @@ SEE ALSO
 --------
 **rtla-timerlat**\(1), **rtla-timerlat-hist**\(1)
 
-*timerlat* tracer documentation: <https://www.kernel.org/doc/html/latest/trace/timerlat-tracer.html>
+`Timerlat tracer <https://docs.kernel.org/trace/timerlat-tracer.html>`__
 
 AUTHOR
 ------

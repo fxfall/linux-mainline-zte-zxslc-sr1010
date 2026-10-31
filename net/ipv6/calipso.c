@@ -133,9 +133,8 @@ static int __init calipso_cache_init(void)
 {
 	u32 iter;
 
-	calipso_cache = kcalloc(CALIPSO_CACHE_BUCKETS,
-				sizeof(struct calipso_map_cache_bkt),
-				GFP_KERNEL);
+	calipso_cache = kzalloc_objs(struct calipso_map_cache_bkt,
+				     CALIPSO_CACHE_BUCKETS);
 	if (!calipso_cache)
 		return -ENOMEM;
 
@@ -275,7 +274,7 @@ static int calipso_cache_add(const unsigned char *calipso_ptr,
 
 	calipso_ptr_len = calipso_ptr[1];
 
-	entry = kzalloc(sizeof(*entry), GFP_ATOMIC);
+	entry = kzalloc_obj(*entry, GFP_ATOMIC);
 	if (!entry)
 		return -ENOMEM;
 	entry->key = kmemdup(calipso_ptr + 2, calipso_ptr_len, GFP_ATOMIC);
@@ -1319,7 +1318,7 @@ static int calipso_skbuff_setattr(struct sk_buff *skb,
 	struct ipv6hdr *ip6_hdr;
 	struct ipv6_opt_hdr *hop;
 	unsigned char buf[CALIPSO_MAX_BUFFER];
-	int len_delta, new_end, pad, payload;
+	int len_delta, new_end, pad;
 	unsigned int start, end;
 
 	ip6_hdr = ipv6_hdr(skb);
@@ -1358,8 +1357,8 @@ static int calipso_skbuff_setattr(struct sk_buff *skb,
 			sizeof(*ip6_hdr) + start);
 		skb_reset_network_header(skb);
 		ip6_hdr = ipv6_hdr(skb);
-		payload = ntohs(ip6_hdr->payload_len);
-		ip6_hdr->payload_len = htons(payload + len_delta);
+		/* 0 above IPV6_MAXPLEN (BIG TCP), the real length otherwise */
+		ipv6_set_payload_len(ip6_hdr, skb->len - sizeof(*ip6_hdr));
 	}
 
 	hop = (struct ipv6_opt_hdr *)(ip6_hdr + 1);

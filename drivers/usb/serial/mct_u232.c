@@ -21,11 +21,9 @@
 #include <linux/errno.h>
 #include <linux/slab.h>
 #include <linux/tty.h>
-#include <linux/tty_driver.h>
 #include <linux/tty_flip.h>
 #include <linux/module.h>
 #include <linux/spinlock.h>
-#include <linux/uaccess.h>
 #include <linux/unaligned.h>
 #include <linux/usb.h>
 #include <linux/usb/serial.h>
@@ -396,7 +394,7 @@ static int mct_u232_port_probe(struct usb_serial_port *port)
 	if (pid == MCT_U232_SITECOM_PID)
 		port->bulk_out_size = min(16, port->bulk_out_size);
 
-	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	priv = kzalloc_obj(*priv);
 	if (!priv)
 		return -ENOMEM;
 

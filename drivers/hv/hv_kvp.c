@@ -27,6 +27,7 @@
 #include <linux/connector.h>
 #include <linux/workqueue.h>
 #include <linux/hyperv.h>
+#include <linux/string.h>
 #include <hyperv/hvhdk.h>
 
 #include "hyperv_vmbus.h"
@@ -130,18 +131,15 @@ static void kvp_register_done(void)
 static int
 kvp_register(int reg_value)
 {
-
 	struct hv_kvp_msg *kvp_msg;
-	char *version;
 	int ret;
 
-	kvp_msg = kzalloc(sizeof(*kvp_msg), GFP_KERNEL);
+	kvp_msg = kzalloc_obj(*kvp_msg);
 	if (!kvp_msg)
 		return -ENOMEM;
 
-	version = kvp_msg->body.kvp_register.version;
 	kvp_msg->kvp_hdr.operation = reg_value;
-	strcpy(version, HV_DRV_VERSION);
+	strscpy(kvp_msg->body.kvp_register.version, HV_DRV_VERSION);
 
 	ret = hvutil_transport_send(hvt, kvp_msg, sizeof(*kvp_msg),
 				    kvp_register_done);
@@ -386,7 +384,7 @@ kvp_send_key(struct work_struct *dummy)
 	if (kvp_transaction.state != HVUTIL_HOSTMSG_RECEIVED)
 		return;
 
-	message = kzalloc(sizeof(*message), GFP_KERNEL);
+	message = kzalloc_obj(*message);
 	if (!message)
 		return;
 

@@ -351,7 +351,7 @@ static int rxgk_secure_packet_integrity(const struct rxrpc_call *call,
 
 	_enter("");
 
-	hdr = kzalloc(sizeof(*hdr), GFP_NOFS);
+	hdr = kzalloc_obj(*hdr, GFP_NOFS);
 	if (!hdr)
 		goto error_gk;
 
@@ -488,7 +488,7 @@ static int rxgk_verify_packet_integrity(struct rxrpc_call *call,
 		goto put_gk;
 	}
 
-	hdr = kzalloc(sizeof(*hdr), GFP_NOFS);
+	hdr = kzalloc_obj(*hdr, GFP_NOFS);
 	if (!hdr)
 		goto put_gk;
 
@@ -687,16 +687,17 @@ static int rxgk_issue_challenge(struct rxrpc_connection *conn)
 	ret = do_udp_sendmsg(conn->local->socket, &msg, len);
 	if (ret > 0)
 		rxrpc_peer_mark_tx(conn->peer);
-	__free_page(page);
 
 	if (ret < 0) {
 		trace_rxrpc_tx_fail(conn->debug_id, serial, ret,
 				    rxrpc_tx_point_rxgk_challenge);
+		__free_page(page);
 		return -EAGAIN;
 	}
 
 	trace_rxrpc_tx_packet(conn->debug_id, whdr,
 			      rxrpc_tx_point_rxgk_challenge);
+	__free_page(page);
 	_leave(" = 0");
 	return 0;
 }

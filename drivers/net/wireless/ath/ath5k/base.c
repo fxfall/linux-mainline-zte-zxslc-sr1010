@@ -919,8 +919,8 @@ ath5k_desc_alloc(struct ath5k_hw *ah)
 	ATH5K_DBG(ah, ATH5K_DEBUG_ANY, "DMA map: %p (%zu) -> %llx\n",
 		ds, ah->desc_len, (unsigned long long)ah->desc_daddr);
 
-	bf = kcalloc(1 + ATH_TXBUF + ATH_RXBUF + ATH_BCBUF,
-			sizeof(struct ath5k_buf), GFP_KERNEL);
+	bf = kzalloc_objs(struct ath5k_buf,
+			  1 + ATH_TXBUF + ATH_RXBUF + ATH_BCBUF);
 	if (bf == NULL) {
 		ATH5K_ERR(ah, "can't allocate bufptr\n");
 		ret = -ENOMEM;
@@ -2599,8 +2599,6 @@ ath5k_init_ah(struct ath5k_hw *ah, const struct ath_bus_ops *bus_ops)
 
 	/* SW support for IBSS_RSN is provided by mac80211 */
 	hw->wiphy->flags |= WIPHY_FLAG_IBSS_RSN;
-
-	hw->wiphy->flags |= WIPHY_FLAG_SUPPORTS_5_10_MHZ;
 
 	/* both antennas can be configured as RX or TX */
 	hw->wiphy->available_antennas_tx = 0x3;

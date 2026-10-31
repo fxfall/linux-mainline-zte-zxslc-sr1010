@@ -8,8 +8,7 @@
  *	      Cornelia Huck (cornelia.huck@de.ibm.com)
  */
 
-#define KMSG_COMPONENT "cio"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+#define pr_fmt(fmt) "cio: " fmt
 
 #include <linux/export.h>
 #include <linux/init.h>
@@ -203,7 +202,7 @@ struct subchannel *css_alloc_subchannel(struct subchannel_id schid,
 	if (ret < 0)
 		return ERR_PTR(ret);
 
-	sch = kzalloc(sizeof(*sch), GFP_KERNEL | GFP_DMA);
+	sch = kzalloc_obj(*sch, GFP_KERNEL | GFP_DMA);
 	if (!sch)
 		return ERR_PTR(-ENOMEM);
 
@@ -619,11 +618,6 @@ static int slow_eval_known_fn(struct subchannel *sch, void *data)
 		rc = css_evaluate_known_subchannel(sch, 1);
 		if (rc == -EAGAIN)
 			css_schedule_eval(sch->schid);
-		/*
-		 * The loop might take long time for platforms with lots of
-		 * known devices. Allow scheduling here.
-		 */
-		cond_resched();
 	}
 	return 0;
 }
@@ -655,9 +649,6 @@ static int slow_eval_unknown_fn(struct subchannel_id schid, void *data)
 		default:
 			rc = 0;
 		}
-		/* Allow scheduling here since the containing loop might
-		 * take a while.  */
-		cond_resched();
 	}
 	return rc;
 }
@@ -943,7 +934,7 @@ static int __init setup_css(int nr)
 	struct channel_subsystem *css;
 	int ret;
 
-	css = kzalloc(sizeof(*css), GFP_KERNEL);
+	css = kzalloc_obj(*css);
 	if (!css)
 		return -ENOMEM;
 
@@ -977,8 +968,7 @@ static int __init setup_css(int nr)
 		goto out_err;
 	}
 
-	css->pseudo_subchannel = kzalloc(sizeof(*css->pseudo_subchannel),
-					 GFP_KERNEL);
+	css->pseudo_subchannel = kzalloc_obj(*css->pseudo_subchannel);
 	if (!css->pseudo_subchannel) {
 		device_unregister(&css->device);
 		ret = -ENOMEM;

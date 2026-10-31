@@ -132,7 +132,7 @@ static DECLARE_WORK(deferred_probe_work, deferred_probe_work_func);
 
 void driver_deferred_probe_add(struct device *dev)
 {
-	if (!dev->can_match)
+	if (!dev_can_match(dev))
 		return;
 
 	mutex_lock(&deferred_probe_mutex);
@@ -193,7 +193,7 @@ void driver_deferred_probe_trigger(void)
 	 * Kick the re-probe thread.  It may already be scheduled, but it is
 	 * safe to kick it again.
 	 */
-	queue_work(system_unbound_wq, &deferred_probe_work);
+	queue_work(system_dfl_wq, &deferred_probe_work);
 }
 
 /**
@@ -257,11 +257,7 @@ static int deferred_devs_show(struct seq_file *s, void *data)
 }
 DEFINE_SHOW_ATTRIBUTE(deferred_devs);
 
-#ifdef CONFIG_MODULES
-static int driver_deferred_probe_timeout = 10;
-#else
-static int driver_deferred_probe_timeout;
-#endif
+static int driver_deferred_probe_timeout = CONFIG_DRIVER_DEFERRED_PROBE_TIMEOUT;
 
 static int __init deferred_probe_timeout_setup(char *str)
 {
@@ -327,12 +323,11 @@ void deferred_probe_extend_timeout(void)
 	 * If the work hasn't been queued yet or if the work expired, don't
 	 * start a new one.
 	 */
-	if (cancel_delayed_work(&deferred_probe_timeout_work)) {
-		schedule_delayed_work(&deferred_probe_timeout_work,
-				driver_deferred_probe_timeout * HZ);
+	if (delayed_work_pending(&deferred_probe_timeout_work) &&
+	    mod_delayed_work(system_percpu_wq, &deferred_probe_timeout_work,
+			     secs_to_jiffies(driver_deferred_probe_timeout)))
 		pr_debug("Extended deferred probe timeout by %d secs\n",
 					driver_deferred_probe_timeout);
-	}
 }
 
 /**
@@ -383,8 +378,7 @@ __exitcall(deferred_probe_exit);
 
 int __device_set_driver_override(struct device *dev, const char *s, size_t len)
 {
-	const char *new, *old;
-	char *cp;
+	const char *new = NULL, *old;
 
 	if (!s)
 		return -EINVAL;
@@ -404,37 +398,30 @@ int __device_set_driver_override(struct device *dev, const char *s, size_t len)
 	 */
 	len = strlen(s);
 
-	if (!len) {
-		/* Empty string passed - clear override */
-		spin_lock(&dev->driver_override.lock);
+	/* Handle trailing newline */
+	if (len) {
+		char *cp;
+
+		cp = strnchr(s, len, '\n');
+		if (cp)
+			len = cp - s;
+	}
+
+	/*
+	 * If empty string or "\n" passed, new remains NULL, clearing
+	 * the driver_override.name.
+	 */
+	if (len) {
+		new = kstrndup(s, len, GFP_KERNEL);
+		if (!new)
+			return -ENOMEM;
+	}
+
+	scoped_guard(spinlock, &dev->driver_override.lock) {
 		old = dev->driver_override.name;
-		dev->driver_override.name = NULL;
-		spin_unlock(&dev->driver_override.lock);
-		kfree(old);
-
-		return 0;
-	}
-
-	cp = strnchr(s, len, '\n');
-	if (cp)
-		len = cp - s;
-
-	new = kstrndup(s, len, GFP_KERNEL);
-	if (!new)
-		return -ENOMEM;
-
-	spin_lock(&dev->driver_override.lock);
-	old = dev->driver_override.name;
-	if (cp != s) {
 		dev->driver_override.name = new;
-		spin_unlock(&dev->driver_override.lock);
-	} else {
-		/* "\n" passed - clear override */
-		dev->driver_override.name = NULL;
-		spin_unlock(&dev->driver_override.lock);
-
-		kfree(new);
 	}
+
 	kfree(old);
 
 	return 0;
@@ -581,12 +568,10 @@ static ssize_t state_synced_store(struct device *dev,
 		return -EINVAL;
 
 	device_lock(dev);
-	if (!dev->state_synced) {
-		dev->state_synced = true;
+	if (!dev_test_and_set_state_synced(dev))
 		dev_sync_state(dev);
-	} else {
+	else
 		ret = -EINVAL;
-	}
 	device_unlock(dev);
 
 	return ret ? ret : count;
@@ -598,7 +583,7 @@ static ssize_t state_synced_show(struct device *dev,
 	bool val;
 
 	device_lock(dev);
-	val = dev->state_synced;
+	val = dev_state_synced(dev);
 	device_unlock(dev);
 
 	return sysfs_emit(buf, "%u\n", val);
@@ -607,6 +592,8 @@ static DEVICE_ATTR_RW(state_synced);
 
 static void device_unbind_cleanup(struct device *dev)
 {
+	if (dev->driver->p_cb.post_unbind_rust)
+		dev->driver->p_cb.post_unbind_rust(dev);
 	devres_release_all(dev);
 	arch_teardown_dma_ops(dev);
 	kfree(dev->dma_range_map);
@@ -803,8 +790,8 @@ static int really_probe_debug(struct device *dev, const struct device_driver *dr
 	 * CONFIG_DYNAMIC_DEBUG and we want a simple 'initcall_debug' on the
 	 * kernel commandline to print this all the time at the debug level.
 	 */
-	printk(KERN_DEBUG "probe of %s returned %d after %lld usecs\n",
-		 dev_name(dev), ret, ktime_us_delta(rettime, calltime));
+	printk(KERN_DEBUG "probe of %s with driver %s returned %d after %lld usecs\n",
+	       dev_name(dev), drv->name, ret, ktime_us_delta(rettime, calltime));
 	return ret;
 }
 
@@ -859,14 +846,14 @@ static int __driver_probe_device(const struct device_driver *drv, struct device 
 		return dev_err_probe(dev, -EPROBE_DEFER, "Device not ready to probe\n");
 
 	/*
-	 * Set can_match = true after calling dev_ready_to_probe(), so
+	 * Call dev_set_can_match() after calling dev_ready_to_probe(), so
 	 * driver_deferred_probe_add() won't actually add the device to the
 	 * deferred probe list when dev_ready_to_probe() returns false.
 	 *
 	 * When dev_ready_to_probe() returns false, it means that device_add()
 	 * will do another probe() attempt for us.
 	 */
-	dev->can_match = true;
+	dev_set_can_match(dev);
 	dev_dbg(dev, "bus: '%s': %s: matched device with driver %s\n",
 		drv->bus->name, __func__, drv->name);
 
@@ -1012,7 +999,7 @@ static int __device_attach_driver(struct device_driver *drv, void *_data)
 		return 0;
 	} else if (ret == -EPROBE_DEFER) {
 		dev_dbg(dev, "Device match requests probe deferral\n");
-		dev->can_match = true;
+		dev_set_can_match(dev);
 		driver_deferred_probe_add(dev);
 		/*
 		 * Device can't match with a driver right now, so don't attempt
@@ -1157,7 +1144,15 @@ EXPORT_SYMBOL_GPL(device_attach);
 
 void device_initial_probe(struct device *dev)
 {
-	__device_attach(dev, true);
+	struct subsys_private *sp = bus_to_subsys(dev->bus);
+
+	if (!sp)
+		return;
+
+	if (sp->drivers_autoprobe)
+		__device_attach(dev, true);
+
+	subsys_put(sp);
 }
 
 /*
@@ -1256,7 +1251,7 @@ static int __driver_attach(struct device *dev, void *data)
 		return 0;
 	} else if (ret == -EPROBE_DEFER) {
 		dev_dbg(dev, "Device match requests probe deferral\n");
-		dev->can_match = true;
+		dev_set_can_match(dev);
 		driver_deferred_probe_add(dev);
 		/*
 		 * Driver could not match with device, but may match with

@@ -44,6 +44,7 @@ struct pca9450 {
 	unsigned int rcnt;
 	int irq;
 	bool sd_vsel_fixed_low;
+	int default_t_off_deb;
 };
 
 static const struct regmap_range pca9450_status_range = {
@@ -249,7 +250,7 @@ static int buck_set_dvs(const struct regulator_desc *desc,
 	}
 
 	if (ret == 0) {
-		struct pca9450_regulator_desc *regulator = container_of(desc,
+		const struct pca9450_regulator_desc *regulator = container_of_const(desc,
 					struct pca9450_regulator_desc, desc);
 
 		/* Enable DVS control through PMIC_STBY_REQ for this BUCK */
@@ -263,7 +264,7 @@ static int pca9450_set_dvs_levels(struct device_node *np,
 			    const struct regulator_desc *desc,
 			    struct regulator_config *cfg)
 {
-	struct pca9450_regulator_desc *data = container_of(desc,
+	const struct pca9450_regulator_desc *data = container_of_const(desc,
 					struct pca9450_regulator_desc, desc);
 	const struct pc9450_dvs_config *dvs = &data->dvs;
 	unsigned int reg, mask;
@@ -308,7 +309,7 @@ static inline unsigned int pca9450_map_mode(unsigned int mode)
 
 static int pca9450_buck_set_mode(struct regulator_dev *rdev, unsigned int mode)
 {
-	struct pca9450_regulator_desc *desc = container_of(rdev->desc,
+	const struct pca9450_regulator_desc *desc = container_of_const(rdev->desc,
 					struct pca9450_regulator_desc, desc);
 	const struct pc9450_dvs_config *dvs = &desc->dvs;
 	int val;
@@ -333,7 +334,7 @@ static int pca9450_buck_set_mode(struct regulator_dev *rdev, unsigned int mode)
 
 static unsigned int pca9450_buck_get_mode(struct regulator_dev *rdev)
 {
-	struct pca9450_regulator_desc *desc = container_of(rdev->desc,
+	const struct pca9450_regulator_desc *desc = container_of_const(rdev->desc,
 					struct pca9450_regulator_desc, desc);
 	const struct pc9450_dvs_config *dvs = &desc->dvs;
 	int ret = 0, regval;
@@ -355,6 +356,7 @@ static struct pca9450_regulator_desc pca9450a_regulators[] = {
 	{
 		.desc = {
 			.name = "buck1",
+			.supply_name = "inb13",
 			.of_match = of_match_ptr("BUCK1"),
 			.regulators_node = of_match_ptr("regulators"),
 			.id = PCA9450_BUCK1,
@@ -388,6 +390,7 @@ static struct pca9450_regulator_desc pca9450a_regulators[] = {
 	{
 		.desc = {
 			.name = "buck2",
+			.supply_name = "inb26",
 			.of_match = of_match_ptr("BUCK2"),
 			.regulators_node = of_match_ptr("regulators"),
 			.id = PCA9450_BUCK2,
@@ -421,6 +424,7 @@ static struct pca9450_regulator_desc pca9450a_regulators[] = {
 	{
 		.desc = {
 			.name = "buck3",
+			.supply_name = "inb13",
 			.of_match = of_match_ptr("BUCK3"),
 			.regulators_node = of_match_ptr("regulators"),
 			.id = PCA9450_BUCK3,
@@ -454,6 +458,7 @@ static struct pca9450_regulator_desc pca9450a_regulators[] = {
 	{
 		.desc = {
 			.name = "buck4",
+			.supply_name = "inb45",
 			.of_match = of_match_ptr("BUCK4"),
 			.regulators_node = of_match_ptr("regulators"),
 			.id = PCA9450_BUCK4,
@@ -478,6 +483,7 @@ static struct pca9450_regulator_desc pca9450a_regulators[] = {
 	{
 		.desc = {
 			.name = "buck5",
+			.supply_name = "inb45",
 			.of_match = of_match_ptr("BUCK5"),
 			.regulators_node = of_match_ptr("regulators"),
 			.id = PCA9450_BUCK5,
@@ -502,6 +508,7 @@ static struct pca9450_regulator_desc pca9450a_regulators[] = {
 	{
 		.desc = {
 			.name = "buck6",
+			.supply_name = "inb26",
 			.of_match = of_match_ptr("BUCK6"),
 			.regulators_node = of_match_ptr("regulators"),
 			.id = PCA9450_BUCK6,
@@ -526,6 +533,7 @@ static struct pca9450_regulator_desc pca9450a_regulators[] = {
 	{
 		.desc = {
 			.name = "ldo1",
+			.supply_name = "inl1",
 			.of_match = of_match_ptr("LDO1"),
 			.regulators_node = of_match_ptr("regulators"),
 			.id = PCA9450_LDO1,
@@ -544,6 +552,7 @@ static struct pca9450_regulator_desc pca9450a_regulators[] = {
 	{
 		.desc = {
 			.name = "ldo2",
+			.supply_name = "inl1",
 			.of_match = of_match_ptr("LDO2"),
 			.regulators_node = of_match_ptr("regulators"),
 			.id = PCA9450_LDO2,
@@ -562,6 +571,7 @@ static struct pca9450_regulator_desc pca9450a_regulators[] = {
 	{
 		.desc = {
 			.name = "ldo3",
+			.supply_name = "inl1",
 			.of_match = of_match_ptr("LDO3"),
 			.regulators_node = of_match_ptr("regulators"),
 			.id = PCA9450_LDO3,
@@ -580,6 +590,7 @@ static struct pca9450_regulator_desc pca9450a_regulators[] = {
 	{
 		.desc = {
 			.name = "ldo4",
+			.supply_name = "inl1",
 			.of_match = of_match_ptr("LDO4"),
 			.regulators_node = of_match_ptr("regulators"),
 			.id = PCA9450_LDO4,
@@ -598,6 +609,7 @@ static struct pca9450_regulator_desc pca9450a_regulators[] = {
 	{
 		.desc = {
 			.name = "ldo5",
+			.supply_name = "inl1",
 			.of_match = of_match_ptr("LDO5"),
 			.regulators_node = of_match_ptr("regulators"),
 			.id = PCA9450_LDO5,
@@ -623,6 +635,7 @@ static struct pca9450_regulator_desc pca9450bc_regulators[] = {
 	{
 		.desc = {
 			.name = "buck1",
+			.supply_name = "inb13",
 			.of_match = of_match_ptr("BUCK1"),
 			.regulators_node = of_match_ptr("regulators"),
 			.id = PCA9450_BUCK1,
@@ -656,6 +669,7 @@ static struct pca9450_regulator_desc pca9450bc_regulators[] = {
 	{
 		.desc = {
 			.name = "buck2",
+			.supply_name = "inb26",
 			.of_match = of_match_ptr("BUCK2"),
 			.regulators_node = of_match_ptr("regulators"),
 			.id = PCA9450_BUCK2,
@@ -689,6 +703,7 @@ static struct pca9450_regulator_desc pca9450bc_regulators[] = {
 	{
 		.desc = {
 			.name = "buck4",
+			.supply_name = "inb45",
 			.of_match = of_match_ptr("BUCK4"),
 			.regulators_node = of_match_ptr("regulators"),
 			.id = PCA9450_BUCK4,
@@ -713,6 +728,7 @@ static struct pca9450_regulator_desc pca9450bc_regulators[] = {
 	{
 		.desc = {
 			.name = "buck5",
+			.supply_name = "inb45",
 			.of_match = of_match_ptr("BUCK5"),
 			.regulators_node = of_match_ptr("regulators"),
 			.id = PCA9450_BUCK5,
@@ -737,6 +753,7 @@ static struct pca9450_regulator_desc pca9450bc_regulators[] = {
 	{
 		.desc = {
 			.name = "buck6",
+			.supply_name = "inb26",
 			.of_match = of_match_ptr("BUCK6"),
 			.regulators_node = of_match_ptr("regulators"),
 			.id = PCA9450_BUCK6,
@@ -761,6 +778,7 @@ static struct pca9450_regulator_desc pca9450bc_regulators[] = {
 	{
 		.desc = {
 			.name = "ldo1",
+			.supply_name = "inl1",
 			.of_match = of_match_ptr("LDO1"),
 			.regulators_node = of_match_ptr("regulators"),
 			.id = PCA9450_LDO1,
@@ -779,6 +797,7 @@ static struct pca9450_regulator_desc pca9450bc_regulators[] = {
 	{
 		.desc = {
 			.name = "ldo2",
+			.supply_name = "inl1",
 			.of_match = of_match_ptr("LDO2"),
 			.regulators_node = of_match_ptr("regulators"),
 			.id = PCA9450_LDO2,
@@ -797,6 +816,7 @@ static struct pca9450_regulator_desc pca9450bc_regulators[] = {
 	{
 		.desc = {
 			.name = "ldo3",
+			.supply_name = "inl1",
 			.of_match = of_match_ptr("LDO3"),
 			.regulators_node = of_match_ptr("regulators"),
 			.id = PCA9450_LDO3,
@@ -815,6 +835,7 @@ static struct pca9450_regulator_desc pca9450bc_regulators[] = {
 	{
 		.desc = {
 			.name = "ldo4",
+			.supply_name = "inl1",
 			.of_match = of_match_ptr("LDO4"),
 			.regulators_node = of_match_ptr("regulators"),
 			.id = PCA9450_LDO4,
@@ -833,6 +854,7 @@ static struct pca9450_regulator_desc pca9450bc_regulators[] = {
 	{
 		.desc = {
 			.name = "ldo5",
+			.supply_name = "inl1",
 			.of_match = of_match_ptr("LDO5"),
 			.regulators_node = of_match_ptr("regulators"),
 			.id = PCA9450_LDO5,
@@ -854,6 +876,7 @@ static struct pca9450_regulator_desc pca9451a_regulators[] = {
 	{
 		.desc = {
 			.name = "buck1",
+			.supply_name = "inb13",
 			.of_match = of_match_ptr("BUCK1"),
 			.regulators_node = of_match_ptr("regulators"),
 			.id = PCA9450_BUCK1,
@@ -886,6 +909,7 @@ static struct pca9450_regulator_desc pca9451a_regulators[] = {
 	{
 		.desc = {
 			.name = "buck2",
+			.supply_name = "inb26",
 			.of_match = of_match_ptr("BUCK2"),
 			.regulators_node = of_match_ptr("regulators"),
 			.id = PCA9450_BUCK2,
@@ -918,6 +942,7 @@ static struct pca9450_regulator_desc pca9451a_regulators[] = {
 	{
 		.desc = {
 			.name = "buck4",
+			.supply_name = "inb45",
 			.of_match = of_match_ptr("BUCK4"),
 			.regulators_node = of_match_ptr("regulators"),
 			.id = PCA9450_BUCK4,
@@ -942,6 +967,7 @@ static struct pca9450_regulator_desc pca9451a_regulators[] = {
 	{
 		.desc = {
 			.name = "buck5",
+			.supply_name = "inb45",
 			.of_match = of_match_ptr("BUCK5"),
 			.regulators_node = of_match_ptr("regulators"),
 			.id = PCA9450_BUCK5,
@@ -966,6 +992,7 @@ static struct pca9450_regulator_desc pca9451a_regulators[] = {
 	{
 		.desc = {
 			.name = "buck6",
+			.supply_name = "inb26",
 			.of_match = of_match_ptr("BUCK6"),
 			.regulators_node = of_match_ptr("regulators"),
 			.id = PCA9450_BUCK6,
@@ -990,6 +1017,7 @@ static struct pca9450_regulator_desc pca9451a_regulators[] = {
 	{
 		.desc = {
 			.name = "ldo1",
+			.supply_name = "inl1",
 			.of_match = of_match_ptr("LDO1"),
 			.regulators_node = of_match_ptr("regulators"),
 			.id = PCA9450_LDO1,
@@ -1008,6 +1036,7 @@ static struct pca9450_regulator_desc pca9451a_regulators[] = {
 	{
 		.desc = {
 			.name = "ldo3",
+			.supply_name = "inl1",
 			.of_match = of_match_ptr("LDO3"),
 			.regulators_node = of_match_ptr("regulators"),
 			.id = PCA9450_LDO3,
@@ -1026,6 +1055,7 @@ static struct pca9450_regulator_desc pca9451a_regulators[] = {
 	{
 		.desc = {
 			.name = "ldo4",
+			.supply_name = "inl1",
 			.of_match = of_match_ptr("LDO4"),
 			.regulators_node = of_match_ptr("regulators"),
 			.id = PCA9450_LDO4,
@@ -1044,6 +1074,7 @@ static struct pca9450_regulator_desc pca9451a_regulators[] = {
 	{
 		.desc = {
 			.name = "ldo5",
+			.supply_name = "inl1",
 			.of_match = of_match_ptr("LDO5"),
 			.regulators_node = of_match_ptr("regulators"),
 			.id = PCA9450_LDO5,
@@ -1179,7 +1210,7 @@ static int pca9450_of_init(struct pca9450 *pca9450)
 
 	ret = of_property_read_u32(i2c->dev.of_node, "nxp,pmic-on-req-off-debounce-us", &val);
 	if (ret == -EINVAL)
-		t_off_deb = T_OFF_DEB_120US;
+		t_off_deb = pca9450->default_t_off_deb;
 	else if (ret)
 		return ret;
 	else {
@@ -1274,21 +1305,25 @@ static int pca9450_i2c_probe(struct i2c_client *i2c)
 	case PCA9450_TYPE_PCA9450A:
 		regulator_desc = pca9450a_regulators;
 		pca9450->rcnt = ARRAY_SIZE(pca9450a_regulators);
+		pca9450->default_t_off_deb = T_OFF_DEB_120US;
 		type_name = "pca9450a";
 		break;
 	case PCA9450_TYPE_PCA9450BC:
 		regulator_desc = pca9450bc_regulators;
 		pca9450->rcnt = ARRAY_SIZE(pca9450bc_regulators);
+		pca9450->default_t_off_deb = T_OFF_DEB_120US;
 		type_name = "pca9450bc";
 		break;
 	case PCA9450_TYPE_PCA9451A:
 		regulator_desc = pca9451a_regulators;
 		pca9450->rcnt = ARRAY_SIZE(pca9451a_regulators);
+		pca9450->default_t_off_deb = T_OFF_DEB_2MS;
 		type_name = "pca9451a";
 		break;
 	case PCA9450_TYPE_PCA9452:
 		regulator_desc = pca9451a_regulators;
 		pca9450->rcnt = ARRAY_SIZE(pca9451a_regulators);
+		pca9450->default_t_off_deb = T_OFF_DEB_2MS;
 		type_name = "pca9452";
 		break;
 	default:

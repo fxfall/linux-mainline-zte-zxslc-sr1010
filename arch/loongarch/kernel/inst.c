@@ -209,6 +209,9 @@ int larch_insn_write(void *addr, u32 insn)
 	int ret;
 	unsigned long flags = 0;
 
+	if ((unsigned long)addr & 3)
+		return -EINVAL;
+
 	raw_spin_lock_irqsave(&patch_lock, flags);
 	ret = copy_to_kernel_nofault(addr, &insn, LOONGARCH_INSN_SIZE);
 	raw_spin_unlock_irqrestore(&patch_lock, flags);
@@ -220,9 +223,6 @@ int larch_insn_patch_text(void *addr, u32 insn)
 {
 	int ret;
 	u32 *tp = addr;
-
-	if ((unsigned long)tp & 3)
-		return -EINVAL;
 
 	ret = larch_insn_write(tp, insn);
 	if (!ret)
@@ -266,8 +266,14 @@ int larch_insn_text_copy(void *dst, void *src, size_t len)
 		.dst = dst,
 		.src = src,
 		.len = len,
-		.cpu = smp_processor_id(),
+		.cpu = raw_smp_processor_id(),
 	};
+
+	/*
+	 * Ensure copy.cpu won't be hot removed before stop_machine.
+	 * If it is removed nobody will really update the text.
+	 */
+	lockdep_assert_cpus_held();
 
 	start = round_down((size_t)dst, PAGE_SIZE);
 	end   = round_up((size_t)dst + len, PAGE_SIZE);
@@ -278,7 +284,7 @@ int larch_insn_text_copy(void *dst, void *src, size_t len)
 		return err;
 	}
 
-	ret = stop_machine(text_copy_cb, &copy, cpu_online_mask);
+	ret = stop_machine_cpuslocked(text_copy_cb, &copy, cpu_online_mask);
 
 	err = set_memory_rox(start, (end - start) / PAGE_SIZE);
 	if (err) {

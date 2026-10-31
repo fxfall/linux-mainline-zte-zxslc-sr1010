@@ -52,7 +52,7 @@ static ssize_t id_show(struct device *dev, struct device_attribute *attr, char *
 	struct cxl_nvdimm *cxl_nvd = nvdimm_provider_data(nvdimm);
 	struct cxl_dev_state *cxlds = cxl_nvd->cxlmd->cxlds;
 
-	return sysfs_emit(buf, "%lld\n", cxlds->serial);
+	return sysfs_emit(buf, "%llu\n", cxlds->serial);
 }
 static DEVICE_ATTR_RO(id);
 
@@ -251,7 +251,7 @@ static int cxl_pmem_set_config_data(struct cxl_memdev_state *mds,
 		return -EINVAL;
 
 	set_lsa =
-		kvzalloc(struct_size(set_lsa, data, cmd->in_length), GFP_KERNEL);
+		kvzalloc_flex(*set_lsa, data, cmd->in_length);
 	if (!set_lsa)
 		return -ENOMEM;
 
@@ -446,7 +446,7 @@ static int cxl_pmem_region_probe(struct device *dev)
 	set_bit(ND_REGION_CXL, &ndr_desc.flags);
 	set_bit(ND_REGION_PERSIST_MEMCTRL, &ndr_desc.flags);
 
-	info = kmalloc_array(cxlr_pmem->nr_mappings, sizeof(*info), GFP_KERNEL);
+	info = kmalloc_objs(*info, cxlr_pmem->nr_mappings);
 	if (!info)
 		return -ENOMEM;
 

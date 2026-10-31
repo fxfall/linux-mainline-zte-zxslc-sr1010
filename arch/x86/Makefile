@@ -48,7 +48,8 @@ endif
 
 # How to compile the 16-bit code.  Note we always compile for -march=i386;
 # that way we can complain to the user if the CPU is insufficient.
-REALMODE_CFLAGS	:= -std=gnu11 -m16 -g -Os -DDISABLE_BRANCH_PROFILING -D__DISABLE_EXPORTS \
+REALMODE_CFLAGS	:= $(CC_FLAGS_DIALECT) -m16 -g -Os \
+		   -DDISABLE_BRANCH_PROFILING -D__DISABLE_EXPORTS \
 		   -Wall -Wstrict-prototypes -march=i386 -mregparm=3 \
 		   -fno-strict-aliasing -fomit-frame-pointer -fno-pic \
 		   -mno-mmx -mno-sse $(call cc-option,-fcf-protection=none)
@@ -58,9 +59,6 @@ REALMODE_CFLAGS += -fno-stack-protector
 REALMODE_CFLAGS += -Wno-address-of-packed-member
 REALMODE_CFLAGS += $(cc_stack_align4)
 REALMODE_CFLAGS += $(CLANG_FLAGS)
-ifdef CONFIG_CC_IS_CLANG
-REALMODE_CFLAGS += -Wno-gnu
-endif
 export REALMODE_CFLAGS
 
 # BITS is used as extension for files which are available in a 32 bit
@@ -130,11 +128,6 @@ ifeq ($(CONFIG_X86_32),y)
         include $(srctree)/arch/x86/Makefile_32.cpu
         KBUILD_CFLAGS += $(cflags-y)
 
-    ifneq ($(call clang-min-version, 160000),y)
-        # https://github.com/llvm/llvm-project/issues/53645
-        KBUILD_CFLAGS += -ffreestanding
-    endif
-
         percpu_seg := fs
 else
         BITS := 64
@@ -168,6 +161,11 @@ else
 
 ifdef CONFIG_X86_NATIVE_CPU
         KBUILD_CFLAGS += -march=native
+        # Prevent the compiler from generating EGPR use. The kernel is
+        # not yet prepared for general in-kernel use.
+        KBUILD_CFLAGS += $(call cc-option,-mno-apx-features=egpr)
+
+        # generate_rust_target.rs handles Rust APX gating.
         KBUILD_RUSTFLAGS += -Ctarget-cpu=native
 else
         KBUILD_CFLAGS += -march=x86-64 -mtune=generic
@@ -254,7 +252,7 @@ endif
 
 
 archscripts: scripts_basic
-	$(Q)$(MAKE) $(build)=arch/x86/tools relocs
+	$(Q)$(MAKE) $(build)=arch/x86/tools relocs vdso2c
 
 ###
 # Syscall table generation
@@ -282,7 +280,6 @@ archprepare: $(cpufeaturemasks.hdr)
 libs-y  += arch/x86/lib/
 
 # drivers-y are linked after core-y
-drivers-$(CONFIG_MATH_EMULATION) += arch/x86/math-emu/
 drivers-$(CONFIG_PCI)            += arch/x86/pci/
 
 # suspend and hibernation support
@@ -320,9 +317,9 @@ PHONY += install
 install:
 	$(call cmd,install)
 
-vdso-install-$(CONFIG_X86_64)		+= arch/x86/entry/vdso/vdso64.so.dbg
-vdso-install-$(CONFIG_X86_X32_ABI)	+= arch/x86/entry/vdso/vdsox32.so.dbg
-vdso-install-$(CONFIG_COMPAT_32)	+= arch/x86/entry/vdso/vdso32.so.dbg
+vdso-install-$(CONFIG_X86_64)	   += arch/x86/entry/vdso/vdso64/vdso64.so.dbg
+vdso-install-$(CONFIG_X86_X32_ABI) += arch/x86/entry/vdso/vdso64/vdsox32.so.dbg
+vdso-install-$(CONFIG_COMPAT_32)   += arch/x86/entry/vdso/vdso32/vdso32.so.dbg
 
 archprepare: checkbin
 checkbin:

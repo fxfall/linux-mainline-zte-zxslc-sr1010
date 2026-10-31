@@ -64,6 +64,60 @@ static int hfs_get_last_session(struct super_block *sb,
 	return 0;
 }
 
+bool is_hfs_cnid_counts_valid(struct super_block *sb)
+{
+	struct hfs_sb_info *sbi = HFS_SB(sb);
+	bool corrupted = false;
+
+	if (unlikely(atomic64_read(&sbi->next_id) > U32_MAX)) {
+		pr_warn("next CNID exceeds limit\n");
+		corrupted = true;
+	}
+	if (unlikely(atomic64_read(&sbi->file_count) > U32_MAX)) {
+		pr_warn("file count exceeds limit\n");
+		corrupted = true;
+	}
+	if (unlikely(atomic64_read(&sbi->folder_count) > U32_MAX)) {
+		pr_warn("folder count exceeds limit\n");
+		corrupted = true;
+	}
+
+	return !corrupted;
+}
+
+/*
+ * hfs_sect_offset() - get byte offset within the buffer_head.
+ */
+static unsigned int hfs_sect_offset(struct super_block *sb, sector_t sec)
+{
+	loff_t start = (loff_t)sec << HFS_SECTOR_SIZE_BITS;
+
+	return start & (sb->s_blocksize - 1);
+}
+
+/*
+ * hfs_mdb_publish() - copy the in-memory primary MDB to the on-disk buffer.
+ */
+static void hfs_mdb_publish(struct hfs_sb_info *sbi)
+{
+	lock_buffer(sbi->mdb_bh);
+	memcpy(sbi->mdb_bh->b_data + sbi->mdb_offset, sbi->mdb, HFS_SECTOR_SIZE);
+	mark_buffer_dirty(sbi->mdb_bh);
+	unlock_buffer(sbi->mdb_bh);
+}
+
+/*
+ * hfs_alt_mdb_publish() - copy the in-memory alternate MDB to its buffer.
+ */
+static void hfs_alt_mdb_publish(struct hfs_sb_info *sbi)
+{
+	lock_buffer(sbi->alt_mdb_bh);
+	memcpy(sbi->alt_mdb_bh->b_data + sbi->alt_mdb_offset, sbi->alt_mdb,
+	       HFS_SECTOR_SIZE);
+	mark_buffer_dirty(sbi->alt_mdb_bh);
+	unlock_buffer(sbi->alt_mdb_bh);
+}
+
 /*
  * hfs_mdb_get()
  *
@@ -73,7 +127,7 @@ static int hfs_get_last_session(struct super_block *sb,
 int hfs_mdb_get(struct super_block *sb)
 {
 	struct buffer_head *bh;
-	struct hfs_mdb *mdb, *mdb2;
+	struct hfs_mdb *mdb, *alt_mdb;
 	unsigned int block;
 	char *ptr;
 	int off2, len, size, sect;
@@ -137,7 +191,14 @@ int hfs_mdb_get(struct super_block *sb)
 		return -EIO;
 	}
 
+	mdb = kmemdup(mdb, HFS_SECTOR_SIZE, GFP_KERNEL);
+	if (!mdb) {
+		brelse(bh);
+		return -ENOMEM;
+	}
+
 	HFS_SB(sb)->mdb_bh = bh;
+	HFS_SB(sb)->mdb_offset = hfs_sect_offset(sb, part_start + HFS_MDB_BLK);
 	HFS_SB(sb)->mdb = mdb;
 
 	/* These parameters are read from the MDB, and never written */
@@ -159,13 +220,25 @@ int hfs_mdb_get(struct super_block *sb)
 	atomic64_set(&HFS_SB(sb)->file_count, be32_to_cpu(mdb->drFilCnt));
 	atomic64_set(&HFS_SB(sb)->folder_count, be32_to_cpu(mdb->drDirCnt));
 
+	if (!is_hfs_cnid_counts_valid(sb)) {
+		pr_warn("filesystem possibly corrupted, running fsck.hfs is recommended. Mounting read-only.\n");
+		sb->s_flags |= SB_RDONLY;
+	}
+
 	/* TRY to get the alternate (backup) MDB. */
 	sect = part_start + part_size - 2;
-	bh = sb_bread512(sb, sect, mdb2);
+	bh = sb_bread512(sb, sect, alt_mdb);
 	if (bh) {
-		if (mdb2->drSigWord == cpu_to_be16(HFS_SUPER_MAGIC)) {
-			HFS_SB(sb)->alt_mdb_bh = bh;
-			HFS_SB(sb)->alt_mdb = mdb2;
+		if (alt_mdb->drSigWord == cpu_to_be16(HFS_SUPER_MAGIC)) {
+			alt_mdb = kmemdup(alt_mdb, HFS_SECTOR_SIZE, GFP_KERNEL);
+			if (alt_mdb) {
+				HFS_SB(sb)->alt_mdb_bh = bh;
+				HFS_SB(sb)->alt_mdb_offset =
+					hfs_sect_offset(sb, sect);
+				HFS_SB(sb)->alt_mdb = alt_mdb;
+			} else {
+				brelse(bh);
+			}
 		} else
 			brelse(bh);
 	}
@@ -212,7 +285,7 @@ int hfs_mdb_get(struct super_block *sb)
 
 	attrib = mdb->drAtrb;
 	if (!(attrib & cpu_to_be16(HFS_SB_ATTRIB_UNMNT))) {
-		pr_warn("filesystem was not cleanly unmounted, running fsck.hfs is recommended.  mounting read-only.\n");
+		pr_warn("filesystem was not cleanly unmounted, running fsck.hfs is recommended.	Mounting read-only.\n");
 		sb->s_flags |= SB_RDONLY;
 	}
 	if ((attrib & cpu_to_be16(HFS_SB_ATTRIB_SLOCK))) {
@@ -227,7 +300,7 @@ int hfs_mdb_get(struct super_block *sb)
 		be32_add_cpu(&mdb->drWrCnt, 1);
 		mdb->drLsMod = hfs_mtime();
 
-		mark_buffer_dirty(HFS_SB(sb)->mdb_bh);
+		hfs_mdb_publish(HFS_SB(sb));
 		sync_dirty_buffer(HFS_SB(sb)->mdb_bh);
 	}
 
@@ -248,7 +321,9 @@ int hfs_mdb_get(struct super_block *sb)
  * Output Variable(s):
  *   NONE
  * Returns:
- *   void
+ *   0 on success, -EIO if the MDB or alternate MDB buffer is no longer
+ *   valid (e.g. after a prior write error), in which case the volume is
+ *   remounted read-only.
  * Preconditions:
  *   'mdb' points to a "valid" (struct hfs_mdb).
  * Postconditions:
@@ -258,32 +333,41 @@ int hfs_mdb_get(struct super_block *sb)
  *   If 'backup' is non-zero then the alternate MDB is also written
  *   and the function doesn't return until it is actually on disk.
  */
-void hfs_mdb_commit(struct super_block *sb)
+int hfs_mdb_commit(struct super_block *sb)
 {
 	struct hfs_mdb *mdb = HFS_SB(sb)->mdb;
+	int ret = 0;
 
 	if (sb_rdonly(sb))
-		return;
+		return 0;
 
-	lock_buffer(HFS_SB(sb)->mdb_bh);
+	if (!buffer_uptodate(HFS_SB(sb)->mdb_bh)) {
+		pr_err("primary MDB is corrupt, mounting read-only\n");
+		sb->s_flags |= SB_RDONLY;
+		return -EIO;
+	}
+
 	if (test_and_clear_bit(HFS_FLG_MDB_DIRTY, &HFS_SB(sb)->flags)) {
 		/* These parameters may have been modified, so write them back */
 		mdb->drLsMod = hfs_mtime();
 		mdb->drFreeBks = cpu_to_be16(HFS_SB(sb)->free_ablocks);
-		BUG_ON(atomic64_read(&HFS_SB(sb)->next_id) > U32_MAX);
 		mdb->drNxtCNID =
 			cpu_to_be32((u32)atomic64_read(&HFS_SB(sb)->next_id));
 		mdb->drNmFls = cpu_to_be16(HFS_SB(sb)->root_files);
 		mdb->drNmRtDirs = cpu_to_be16(HFS_SB(sb)->root_dirs);
-		BUG_ON(atomic64_read(&HFS_SB(sb)->file_count) > U32_MAX);
 		mdb->drFilCnt =
 			cpu_to_be32((u32)atomic64_read(&HFS_SB(sb)->file_count));
-		BUG_ON(atomic64_read(&HFS_SB(sb)->folder_count) > U32_MAX);
 		mdb->drDirCnt =
 			cpu_to_be32((u32)atomic64_read(&HFS_SB(sb)->folder_count));
 
+		hfs_inode_write_fork(HFS_SB(sb)->ext_tree->inode, mdb->drXTExtRec,
+				     &mdb->drXTFlSize, NULL);
+		hfs_inode_write_fork(HFS_SB(sb)->cat_tree->inode, mdb->drCTExtRec,
+				     &mdb->drCTFlSize, NULL);
+
 		/* write MDB to disk */
-		mark_buffer_dirty(HFS_SB(sb)->mdb_bh);
+		hfs_mdb_publish(HFS_SB(sb));
+		sync_dirty_buffer(HFS_SB(sb)->mdb_bh);
 	}
 
 	/* write the backup MDB, not returning until it is written.
@@ -291,18 +375,18 @@ void hfs_mdb_commit(struct super_block *sb)
 	 * files grow. */
 	if (test_and_clear_bit(HFS_FLG_ALT_MDB_DIRTY, &HFS_SB(sb)->flags) &&
 	    HFS_SB(sb)->alt_mdb) {
-		hfs_inode_write_fork(HFS_SB(sb)->ext_tree->inode, mdb->drXTExtRec,
-				     &mdb->drXTFlSize, NULL);
-		hfs_inode_write_fork(HFS_SB(sb)->cat_tree->inode, mdb->drCTExtRec,
-				     &mdb->drCTFlSize, NULL);
+		if (!buffer_uptodate(HFS_SB(sb)->alt_mdb_bh)) {
+			pr_err("alternate MDB is corrupt, mounting read-only\n");
+			sb->s_flags |= SB_RDONLY;
+			ret = -EIO;
+			goto out;
+		}
 
-		lock_buffer(HFS_SB(sb)->alt_mdb_bh);
-		memcpy(HFS_SB(sb)->alt_mdb, HFS_SB(sb)->mdb, HFS_SECTOR_SIZE);
+		memcpy(HFS_SB(sb)->alt_mdb, mdb, HFS_SECTOR_SIZE);
 		HFS_SB(sb)->alt_mdb->drAtrb |= cpu_to_be16(HFS_SB_ATTRIB_UNMNT);
 		HFS_SB(sb)->alt_mdb->drAtrb &= cpu_to_be16(~HFS_SB_ATTRIB_INCNSTNT);
-		unlock_buffer(HFS_SB(sb)->alt_mdb_bh);
 
-		mark_buffer_dirty(HFS_SB(sb)->alt_mdb_bh);
+		hfs_alt_mdb_publish(HFS_SB(sb));
 		sync_dirty_buffer(HFS_SB(sb)->alt_mdb_bh);
 	}
 
@@ -337,7 +421,8 @@ void hfs_mdb_commit(struct super_block *sb)
 			size -= len;
 		}
 	}
-	unlock_buffer(HFS_SB(sb)->mdb_bh);
+out:
+	return ret;
 }
 
 void hfs_mdb_close(struct super_block *sb)
@@ -345,9 +430,13 @@ void hfs_mdb_close(struct super_block *sb)
 	/* update volume attributes */
 	if (sb_rdonly(sb))
 		return;
+
+	if (!buffer_uptodate(HFS_SB(sb)->mdb_bh))
+		return;
+
 	HFS_SB(sb)->mdb->drAtrb |= cpu_to_be16(HFS_SB_ATTRIB_UNMNT);
 	HFS_SB(sb)->mdb->drAtrb &= cpu_to_be16(~HFS_SB_ATTRIB_INCNSTNT);
-	mark_buffer_dirty(HFS_SB(sb)->mdb_bh);
+	hfs_mdb_publish(HFS_SB(sb));
 }
 
 /*
@@ -363,6 +452,8 @@ void hfs_mdb_put(struct super_block *sb)
 	/* free the buffers holding the primary and alternate MDBs */
 	brelse(HFS_SB(sb)->mdb_bh);
 	brelse(HFS_SB(sb)->alt_mdb_bh);
+	kfree(HFS_SB(sb)->mdb);
+	kfree(HFS_SB(sb)->alt_mdb);
 
 	unload_nls(HFS_SB(sb)->nls_io);
 	unload_nls(HFS_SB(sb)->nls_disk);

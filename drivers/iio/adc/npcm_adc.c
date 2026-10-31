@@ -8,7 +8,6 @@
 #include <linux/iio/iio.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
@@ -38,7 +37,7 @@ struct npcm_adc {
 	 * read access from userspace. Reading a raw value requires a sequence
 	 * of register writes, then a wait for a event and finally a register
 	 * read, during which userspace could issue another read request.
-	 * This lock protects a read access from ocurring before another one
+	 * This lock protects a read access from occurring before another one
 	 * has finished.
 	 */
 	struct mutex lock;

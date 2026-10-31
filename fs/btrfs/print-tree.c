@@ -38,6 +38,7 @@ static const struct root_name_map root_map[] = {
 	{ BTRFS_BLOCK_GROUP_TREE_OBJECTID,	"BLOCK_GROUP_TREE"	},
 	{ BTRFS_DATA_RELOC_TREE_OBJECTID,	"DATA_RELOC_TREE"	},
 	{ BTRFS_RAID_STRIPE_TREE_OBJECTID,	"RAID_STRIPE_TREE"	},
+	{ BTRFS_REMAP_TREE_OBJECTID,		"REMAP_TREE"		},
 };
 
 const char *btrfs_root_name(const struct btrfs_key *key, char *buf)
@@ -415,12 +416,15 @@ static void key_type_string(const struct btrfs_key *key, char *buf, int buf_size
 		[BTRFS_UUID_KEY_SUBVOL]			= "UUID_KEY_SUBVOL",
 		[BTRFS_UUID_KEY_RECEIVED_SUBVOL]	= "UUID_KEY_RECEIVED_SUBVOL",
 		[BTRFS_RAID_STRIPE_KEY]			= "RAID_STRIPE",
+		[BTRFS_IDENTITY_REMAP_KEY]		= "IDENTITY_REMAP",
+		[BTRFS_REMAP_KEY]			= "REMAP",
+		[BTRFS_REMAP_BACKREF_KEY]		= "REMAP_BACKREF",
 	};
 
 	if (key->type == 0 && key->objectid == BTRFS_FREE_SPACE_OBJECTID)
 		scnprintf(buf, buf_size, "UNTYPED");
 	else if (key_to_str[key->type])
-		scnprintf(buf, buf_size, key_to_str[key->type]);
+		scnprintf(buf, buf_size, "%s", key_to_str[key->type]);
 	else
 		scnprintf(buf, buf_size, "UNKNOWN.%d", key->type);
 }
@@ -435,6 +439,7 @@ void btrfs_print_leaf(const struct extent_buffer *l)
 	struct btrfs_extent_data_ref *dref;
 	struct btrfs_shared_data_ref *sref;
 	struct btrfs_dev_extent *dev_extent;
+	struct btrfs_remap_item *remap;
 	struct btrfs_key key;
 
 	if (!l)
@@ -444,9 +449,9 @@ void btrfs_print_leaf(const struct extent_buffer *l)
 	nr = btrfs_header_nritems(l);
 
 	btrfs_info(fs_info,
-		   "leaf %llu gen %llu total ptrs %d free space %d owner %llu",
+		   "leaf %llu gen %llu total ptrs %d free space %d owner %lld",
 		   btrfs_header_bytenr(l), btrfs_header_generation(l), nr,
-		   btrfs_leaf_free_space(l), btrfs_header_owner(l));
+		   btrfs_leaf_free_space(l), (s64)btrfs_header_owner(l));
 	print_eb_refs_lock(l);
 	for (i = 0 ; i < nr ; i++) {
 		char key_buf[KEY_TYPE_BUF_SIZE];
@@ -569,6 +574,11 @@ void btrfs_print_leaf(const struct extent_buffer *l)
 			print_raid_stripe_key(l, btrfs_item_size(l, i),
 				btrfs_item_ptr(l, i, struct btrfs_stripe_extent));
 			break;
+		case BTRFS_REMAP_KEY:
+		case BTRFS_REMAP_BACKREF_KEY:
+			remap = btrfs_item_ptr(l, i, struct btrfs_remap_item);
+			pr_info("\t\taddress %llu\n", btrfs_remap_address(l, remap));
+			break;
 		}
 	}
 }
@@ -590,10 +600,10 @@ void btrfs_print_tree(const struct extent_buffer *c, bool follow)
 		return;
 	}
 	btrfs_info(fs_info,
-		   "node %llu level %d gen %llu total ptrs %d free spc %u owner %llu",
+		   "node %llu level %d gen %llu total ptrs %d free spc %u owner %lld",
 		   btrfs_header_bytenr(c), level, btrfs_header_generation(c),
 		   nr, (u32)BTRFS_NODEPTRS_PER_BLOCK(fs_info) - nr,
-		   btrfs_header_owner(c));
+		   (s64)btrfs_header_owner(c));
 	print_eb_refs_lock(c);
 	for (i = 0; i < nr; i++) {
 		btrfs_node_key_to_cpu(c, &key, i);
@@ -616,10 +626,6 @@ void btrfs_print_tree(const struct extent_buffer *c, bool follow)
 		next = read_tree_block(fs_info, btrfs_node_blockptr(c, i), &check);
 		if (IS_ERR(next))
 			continue;
-		if (!extent_buffer_uptodate(next)) {
-			free_extent_buffer(next);
-			continue;
-		}
 
 		if (btrfs_is_leaf(next) &&
 		   level != 1)

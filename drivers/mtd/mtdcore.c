@@ -34,6 +34,7 @@
 
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/partitions.h>
+#include <linux/mtd/concat.h>
 
 #include "mtdcore.h"
 
@@ -102,6 +103,15 @@ static void mtd_release(struct device *dev)
 
 	/* remove /dev/mtdXro node */
 	device_destroy(&mtd_class, index + 1);
+}
+
+/*
+ * No-op device release used in add_mtd_device() error paths.
+ * Prevents mtd_release() from being called via device_release(),
+ * which would free the mtd_info that the caller still manages.
+ */
+static void mtd_dev_release_nop(struct device *dev)
+{
 }
 
 static void mtd_device_release(struct kref *kref)
@@ -798,10 +808,8 @@ int add_mtd_device(struct mtd_info *mtd)
 	mtd_check_of_node(mtd);
 	of_node_get(mtd_get_of_node(mtd));
 	error = device_register(&mtd->dev);
-	if (error) {
-		put_device(&mtd->dev);
+	if (error)
 		goto fail_added;
-	}
 
 	/* Add the nvmem provider */
 	error = mtd_nvmem_add(mtd);
@@ -839,8 +847,16 @@ int add_mtd_device(struct mtd_info *mtd)
 	return 0;
 
 fail_nvmem_add:
-	device_unregister(&mtd->dev);
+	device_del(&mtd->dev);
 fail_added:
+	/*
+	 * Clear type and set nop release to prevent mtd_release() ->
+	 * release_mtd_partition() -> free_partition() from freeing mtd.
+	 * The caller handles cleanup on failure.
+	 */
+	mtd->dev.type = NULL;
+	mtd->dev.release = mtd_dev_release_nop;
+	put_device(&mtd->dev);
 	of_node_put(mtd_get_of_node(mtd));
 fail_devname:
 	idr_remove(&mtd_idr, i);
@@ -1067,14 +1083,15 @@ static int mtd_otp_nvmem_add(struct mtd_info *mtd)
 
 err:
 	nvmem_unregister(mtd->otp_user_nvmem);
+	mtd->otp_user_nvmem = NULL;
 	/* Don't report error if OTP is not supported. */
 	if (err == -EOPNOTSUPP)
 		return 0;
 	return dev_err_probe(dev, err, "Failed to register OTP NVMEM device\n");
 }
 
-/*
- * Parse partitions and register an MTD device.
+/**
+ * mtd_device_parse_register - parse partitions and register an MTD device.
  *
  * @mtd: the MTD device to register
  * @types: the list of MTD partition probes to try, see
@@ -1099,24 +1116,14 @@ err:
  * * If no partitions were found this function just registers the MTD device
  *   @mtd and exits.
  *
- * If partitions_only is true, do not use fallback partitions or register
- * the whole master when parsing finds no partitions.
+ * Returns zero in case of success and a negative error code in case of failure.
  */
-static int __mtd_device_parse_register(struct mtd_info *mtd,
-				       const char * const *types,
-				       struct mtd_part_parser_data *parser_data,
-				       const struct mtd_partition *parts,
-				       int nr_parts, bool partitions_only)
+int mtd_device_parse_register(struct mtd_info *mtd, const char * const *types,
+			      struct mtd_part_parser_data *parser_data,
+			      const struct mtd_partition *parts,
+			      int nr_parts)
 {
 	int ret, err;
-
-	/*
-	 * A required partition map must never expose the master, not even
-	 * temporarily.  Supporting that with MTD_PARTITIONED_MASTER would need
-	 * per-device parent and reference-count semantics throughout mtdpart.
-	 */
-	if (partitions_only && IS_ENABLED(CONFIG_MTD_PARTITIONED_MASTER))
-		return -EOPNOTSUPP;
 
 	mtd_set_dev_defaults(mtd);
 
@@ -1130,27 +1137,34 @@ static int __mtd_device_parse_register(struct mtd_info *mtd,
 			goto out;
 	}
 
+	if (IS_REACHABLE(CONFIG_MTD_VIRT_CONCAT)) {
+		ret = mtd_virt_concat_node_create();
+		if (ret < 0)
+			goto out;
+	}
+
 	/* Prefer parsed partitions over driver-provided fallback */
 	ret = parse_mtd_partitions(mtd, types, parser_data);
 	if (ret == -EPROBE_DEFER)
 		goto out;
 
-	if (ret > 0) {
+	if (ret > 0)
 		ret = 0;
-	} else if (partitions_only) {
-		if (!ret)
-			ret = -ENODATA;
-	} else if (nr_parts) {
+	else if (nr_parts)
 		ret = add_mtd_partitions(mtd, parts, nr_parts);
-	} else if (!device_is_registered(&mtd->dev)) {
+	else if (!device_is_registered(&mtd->dev))
 		ret = add_mtd_device(mtd);
-	} else {
+	else
 		ret = 0;
-	}
 
 	if (ret)
 		goto out;
 
+	if (IS_REACHABLE(CONFIG_MTD_VIRT_CONCAT)) {
+		ret = mtd_virt_concat_create_join();
+		if (ret < 0)
+			goto out;
+	}
 	/*
 	 * FIXME: some drivers unfortunately call this function more than once.
 	 * So we have to check if we've already assigned the reboot notifier.
@@ -1180,48 +1194,7 @@ out:
 
 	return ret;
 }
-
-/**
- * mtd_device_parse_register - parse partitions and register an MTD device
- * @mtd: the MTD device to register
- * @types: partition parsers to try, or %NULL for the default list
- * @parser_data: partition parser-specific data
- * @parts: fallback partitions to register when parsing finds none
- * @nr_parts: number of fallback partitions; zero permits whole-master fallback
- *
- * Return: zero on success or a negative error code on failure.
- */
-int mtd_device_parse_register(struct mtd_info *mtd, const char * const *types,
-			      struct mtd_part_parser_data *parser_data,
-			      const struct mtd_partition *parts,
-			      int nr_parts)
-{
-	return __mtd_device_parse_register(mtd, types, parser_data, parts,
-					   nr_parts, false);
-}
 EXPORT_SYMBOL_GPL(mtd_device_parse_register);
-
-/**
- * mtd_device_parse_register_partitions_only - register parsed partitions only
- * @mtd: the MTD device whose partitions must be registered
- * @types: partition parsers to try, or %NULL for the default list
- * @parser_data: partition parser-specific data
- *
- * Parse and register partitions without ever exposing the whole MTD master.
- * A parser result of zero is returned as %-ENODATA and parser errors are
- * propagated.  This helper is incompatible with %MTD_PARTITIONED_MASTER,
- * whose global semantics register the master before parsing.
- *
- * Return: zero on success or a negative error code on failure.
- */
-int mtd_device_parse_register_partitions_only(struct mtd_info *mtd,
-					      const char * const *types,
-					      struct mtd_part_parser_data *parser_data)
-{
-	return __mtd_device_parse_register(mtd, types, parser_data, NULL, 0,
-					   true);
-}
-EXPORT_SYMBOL_GPL(mtd_device_parse_register_partitions_only);
 
 /**
  * mtd_device_unregister - unregister an existing MTD device.
@@ -1241,6 +1214,11 @@ int mtd_device_unregister(struct mtd_info *master)
 	nvmem_unregister(master->otp_user_nvmem);
 	nvmem_unregister(master->otp_factory_nvmem);
 
+	if (IS_REACHABLE(CONFIG_MTD_VIRT_CONCAT)) {
+		err = mtd_virt_concat_destroy(master);
+		if (err)
+			return err;
+	}
 	err = del_mtd_partitions(master);
 	if (err)
 		return err;
@@ -1355,7 +1333,7 @@ int __get_mtd_device(struct mtd_info *mtd)
 	int err;
 
 	if (master->_get_device) {
-		err = master->_get_device(mtd);
+		err = master->_get_device(master);
 		if (err)
 			return err;
 	}
@@ -2676,6 +2654,10 @@ err_reg:
 
 static void __exit cleanup_mtd(void)
 {
+	if (IS_REACHABLE(CONFIG_MTD_VIRT_CONCAT)) {
+		mtd_virt_concat_destroy_joins();
+		mtd_virt_concat_destroy_items();
+	}
 	debugfs_remove_recursive(dfs_dir_mtd);
 	cleanup_mtdchar();
 	if (proc_mtd)

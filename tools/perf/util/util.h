@@ -11,6 +11,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <linux/compiler.h>
+#include <linux/bitmap.h>
 #include <sys/types.h>
 #ifndef __cplusplus
 #include <internal/cpumap.h>
@@ -47,6 +48,10 @@ bool sysctl__nmi_watchdog_enabled(void);
 
 int perf_tip(char **strp, const char *dirpath);
 
+void cpumask_to_cpulist(char *cpumask, char *cpulist);
+
+void print_separator2(int pre_dash_cnt, const char *s, int post_dash_cnt);
+
 #ifndef HAVE_SCHED_GETCPU_SUPPORT
 int sched_getcpu(void);
 #endif
@@ -80,6 +85,8 @@ struct perf_debuginfod {
 	bool		 set;
 };
 void perf_debuginfod_setup(struct perf_debuginfod *di);
+
+const char *perf_basename(const char *path);
 
 char *filename_with_chroot(int pid, const char *filename);
 

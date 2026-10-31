@@ -3,7 +3,7 @@
  * Copyright (C) 2019 - 2021
  *
  * Richard van Schagen <vschagen@icloud.com>
- * Christian Marangi <ansuelsmth@gmail.com
+ * Christian Marangi <ansuelsmth@gmail.com>
  */
 
 #include <crypto/aes.h>
@@ -152,7 +152,7 @@ static int eip93_make_sg_copy(struct scatterlist *src, struct scatterlist **dst,
 {
 	void *pages;
 
-	*dst = kmalloc(sizeof(**dst), GFP_KERNEL);
+	*dst = kmalloc_obj(**dst);
 	if (!*dst)
 		return -ENOMEM;
 
@@ -533,7 +533,7 @@ int eip93_send_req(struct crypto_async_request *async,
 
 	memcpy(iv, reqiv, rctx->ivsize);
 
-	rctx->sa_state = kzalloc(sizeof(*rctx->sa_state), GFP_KERNEL);
+	rctx->sa_state = kzalloc_obj(*rctx->sa_state);
 	if (!rctx->sa_state)
 		return -ENOMEM;
 
@@ -561,8 +561,7 @@ int eip93_send_req(struct crypto_async_request *async,
 			iv[3] = 0xffffffff;
 			crypto_inc((u8 *)iv, AES_BLOCK_SIZE);
 
-			rctx->sa_state_ctr = kzalloc(sizeof(*rctx->sa_state_ctr),
-						     GFP_KERNEL);
+			rctx->sa_state_ctr = kzalloc_obj(*rctx->sa_state_ctr);
 			if (!rctx->sa_state_ctr) {
 				err = -ENOMEM;
 				goto free_sa_state;

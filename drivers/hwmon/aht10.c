@@ -55,18 +55,25 @@
 enum aht10_variant { aht10, aht20, dht20};
 
 static const struct i2c_device_id aht10_id[] = {
-	{ "aht10", aht10 },
-	{ "aht20", aht20 },
-	{ "dht20", dht20 },
-	{ },
+	{ .name = "aht10", .driver_data = aht10 },
+	{ .name = "aht20", .driver_data = aht20 },
+	{ .name = "dht20", .driver_data = dht20 },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, aht10_id);
+
+static const struct of_device_id aht10_of_match[] = {
+	{ .compatible = "aosong,aht10", .data = (void *)aht10 },
+	{ .compatible = "aosong,aht20", .data = (void *)aht20 },
+	{ .compatible = "aosong,dht20", .data = (void *)dht20 },
+	{}
+};
+
+MODULE_DEVICE_TABLE(of, aht10_of_match);
 
 /**
  *   struct aht10_data - All the data required to operate an AHT10/AHT20 chip
  *   @client: the i2c client associated with the AHT10/AHT20
- *   @lock: a mutex that is used to prevent parallel access to the
- *          i2c client
  *   @min_poll_interval: the minimum poll interval
  *                   While the poll rate limit is not 100% necessary,
  *                   the datasheet recommends that a measurement
@@ -87,11 +94,6 @@ MODULE_DEVICE_TABLE(i2c, aht10_id);
 
 struct aht10_data {
 	struct i2c_client *client;
-	/*
-	 * Prevent simultaneous access to the i2c
-	 * client and previous_poll_time
-	 */
-	struct mutex lock;
 	ktime_t min_poll_interval;
 	ktime_t previous_poll_time;
 	int temperature;
@@ -175,32 +177,24 @@ static int aht10_read_values(struct aht10_data *data)
 	u8 raw_data[AHT20_MEAS_SIZE];
 	struct i2c_client *client = data->client;
 
-	mutex_lock(&data->lock);
-	if (!aht10_polltime_expired(data)) {
-		mutex_unlock(&data->lock);
+	if (!aht10_polltime_expired(data))
 		return 0;
-	}
 
 	res = i2c_master_send(client, cmd_meas, sizeof(cmd_meas));
-	if (res < 0) {
-		mutex_unlock(&data->lock);
+	if (res < 0)
 		return res;
-	}
 
 	usleep_range(AHT10_MEAS_DELAY, AHT10_MEAS_DELAY + AHT10_DELAY_EXTRA);
 
 	res = i2c_master_recv(client, raw_data, data->meas_size);
 	if (res != data->meas_size) {
-		mutex_unlock(&data->lock);
 		if (res >= 0)
 			return -ENODATA;
 		return res;
 	}
 
-	if (data->crc8 && crc8_check(raw_data, data->meas_size)) {
-		mutex_unlock(&data->lock);
+	if (data->crc8 && crc8_check(raw_data, data->meas_size))
 		return -EIO;
-	}
 
 	hum =   ((u32)raw_data[1] << 12u) |
 		((u32)raw_data[2] << 4u) |
@@ -217,7 +211,6 @@ static int aht10_read_values(struct aht10_data *data)
 	data->humidity = hum;
 	data->previous_poll_time = ktime_get_boottime();
 
-	mutex_unlock(&data->lock);
 	return 0;
 }
 
@@ -373,8 +366,6 @@ static int aht10_probe(struct i2c_client *client)
 		break;
 	}
 
-	mutex_init(&data->lock);
-
 	res = aht10_init(data);
 	if (res < 0)
 		return res;
@@ -395,6 +386,7 @@ static int aht10_probe(struct i2c_client *client)
 static struct i2c_driver aht10_driver = {
 	.driver = {
 		.name = "aht10",
+		.of_match_table = aht10_of_match,
 	},
 	.probe      = aht10_probe,
 	.id_table   = aht10_id,

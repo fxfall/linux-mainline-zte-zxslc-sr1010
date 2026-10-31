@@ -3151,9 +3151,7 @@ static int mvpp2_txq_init(struct mvpp2_port *port,
 	for (thread = 0; thread < port->priv->nthreads; thread++) {
 		txq_pcpu = per_cpu_ptr(txq->pcpu, thread);
 		txq_pcpu->size = txq->size;
-		txq_pcpu->buffs = kmalloc_array(txq_pcpu->size,
-						sizeof(*txq_pcpu->buffs),
-						GFP_KERNEL);
+		txq_pcpu->buffs = kmalloc_objs(*txq_pcpu->buffs, txq_pcpu->size);
 		if (!txq_pcpu->buffs)
 			return -ENOMEM;
 
@@ -5088,7 +5086,8 @@ static int mvpp2_change_mtu(struct net_device *dev, int mtu)
 			netdev_warn(dev, "mtu %d too high, switching to shared buffers", mtu);
 			mvpp2_bm_switch_buffers(priv, false);
 		}
-	} else {
+	} else if (priv->hw_version >= MVPP22 &&
+		   mvpp2_get_nrxqs(priv) * 2 <= MVPP2_BM_MAX_POOLS) {
 		bool jumbo = false;
 		int i;
 
@@ -5595,6 +5594,13 @@ static int mvpp2_ethtool_set_link_ksettings(struct net_device *dev,
 	return phylink_ethtool_ksettings_set(port->phylink, cmd);
 }
 
+static u32 mvpp2_ethtool_get_rx_ring_count(struct net_device *dev)
+{
+	struct mvpp2_port *port = netdev_priv(dev);
+
+	return port->nrxqs;
+}
+
 static int mvpp2_ethtool_get_rxnfc(struct net_device *dev,
 				   struct ethtool_rxnfc *info, u32 *rules)
 {
@@ -5605,9 +5611,6 @@ static int mvpp2_ethtool_get_rxnfc(struct net_device *dev,
 		return -EOPNOTSUPP;
 
 	switch (info->cmd) {
-	case ETHTOOL_GRXRINGS:
-		info->data = port->nrxqs;
-		break;
 	case ETHTOOL_GRXCLSRLCNT:
 		info->rule_cnt = port->n_rfs_rules;
 		break;
@@ -5842,6 +5845,7 @@ static const struct ethtool_ops mvpp2_eth_tool_ops = {
 	.set_pauseparam		= mvpp2_ethtool_set_pause_param,
 	.get_link_ksettings	= mvpp2_ethtool_get_link_ksettings,
 	.set_link_ksettings	= mvpp2_ethtool_set_link_ksettings,
+	.get_rx_ring_count	= mvpp2_ethtool_get_rx_ring_count,
 	.get_rxnfc		= mvpp2_ethtool_get_rxnfc,
 	.set_rxnfc		= mvpp2_ethtool_set_rxnfc,
 	.get_rxfh_indir_size	= mvpp2_ethtool_get_rxfh_indir_size,

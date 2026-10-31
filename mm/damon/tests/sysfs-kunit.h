@@ -1,8 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Data Access Monitor Unit Tests
- *
- * Author: SeongJae Park <sj@kernel.org>
  */
 
 #ifdef CONFIG_DAMON_SYSFS_KUNIT_TEST
@@ -48,8 +46,8 @@ static void damon_sysfs_test_add_targets(struct kunit *test)
 	if (!sysfs_targets)
 		kunit_skip(test, "sysfs_targets alloc fail");
 	sysfs_targets->nr = 1;
-	sysfs_targets->targets_arr = kmalloc_array(1,
-			sizeof(*sysfs_targets->targets_arr), GFP_KERNEL);
+	sysfs_targets->targets_arr = kmalloc_objs(*sysfs_targets->targets_arr,
+						  1);
 	if (!sysfs_targets->targets_arr) {
 		kfree(sysfs_targets);
 		kunit_skip(test, "targets_arr alloc fail");
@@ -76,8 +74,8 @@ static void damon_sysfs_test_add_targets(struct kunit *test)
 	if (!ctx) {
 		kfree(sysfs_targets->targets_arr);
 		kfree(sysfs_targets);
-		kfree(sysfs_target);
 		kfree(sysfs_target->regions);
+		kfree(sysfs_target);
 		kunit_skip(test, "ctx alloc fail");
 	}
 

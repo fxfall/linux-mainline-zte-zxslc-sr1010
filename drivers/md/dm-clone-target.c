@@ -580,7 +580,7 @@ static int hash_table_init(struct clone *clone)
 
 	sz = 1 << HASH_TABLE_BITS;
 
-	clone->ht = kvmalloc_array(sz, sizeof(struct hash_table_bucket), GFP_KERNEL);
+	clone->ht = kvmalloc_objs(struct hash_table_bucket, sz);
 	if (!clone->ht)
 		return -ENOMEM;
 
@@ -1697,7 +1697,6 @@ static int parse_metadata_dev(struct clone *clone, struct dm_arg_set *as, char *
 static int parse_dest_dev(struct clone *clone, struct dm_arg_set *as, char **error)
 {
 	int r;
-	sector_t dest_dev_size;
 
 	r = dm_get_device(clone->ti, dm_shift_arg(as),
 			  BLK_OPEN_READ | BLK_OPEN_WRITE, &clone->dest_dev);
@@ -1706,33 +1705,18 @@ static int parse_dest_dev(struct clone *clone, struct dm_arg_set *as, char **err
 		return r;
 	}
 
-	dest_dev_size = get_dev_size(clone->dest_dev);
-	if (dest_dev_size < clone->ti->len) {
-		dm_put_device(clone->ti, clone->dest_dev);
-		*error = "Device size larger than destination device";
-		return -EINVAL;
-	}
-
 	return 0;
 }
 
 static int parse_source_dev(struct clone *clone, struct dm_arg_set *as, char **error)
 {
 	int r;
-	sector_t source_dev_size;
 
 	r = dm_get_device(clone->ti, dm_shift_arg(as), BLK_OPEN_READ,
 			  &clone->source_dev);
 	if (r) {
 		*error = "Error opening source device";
 		return r;
-	}
-
-	source_dev_size = get_dev_size(clone->source_dev);
-	if (source_dev_size < clone->ti->len) {
-		dm_put_device(clone->ti, clone->source_dev);
-		*error = "Device size larger than source device";
-		return -EINVAL;
 	}
 
 	return 0;
@@ -1782,7 +1766,7 @@ static int clone_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	as.argc = argc;
 	as.argv = argv;
 
-	clone = kzalloc(sizeof(*clone), GFP_KERNEL);
+	clone = kzalloc_obj(*clone);
 	if (!clone) {
 		ti->error = "Failed to allocate clone structure";
 		return -ENOMEM;

@@ -995,7 +995,13 @@ static void rtw_sdio_rxfifo_recv(struct rtw_dev *rtwdev, u32 rx_len)
 
 	while (true) {
 		rx_desc = skb->data;
-		rtw_rx_query_rx_desc(rtwdev, rx_desc, &pkt_stat, &rx_status);
+		ret = rtw_rx_query_rx_desc(rtwdev, rx_desc,
+					   &pkt_stat, &rx_status);
+		if (ret) {
+			dev_kfree_skb_any(skb);
+			return;
+		}
+
 		pkt_offset = pkt_desc_sz + pkt_stat.drv_info_sz +
 			     pkt_stat.shift;
 
@@ -1290,8 +1296,7 @@ static int rtw_sdio_init_tx(struct rtw_dev *rtwdev)
 
 	for (i = 0; i < RTK_MAX_TX_QUEUE_NUM; i++)
 		skb_queue_head_init(&rtwsdio->tx_queue[i]);
-	rtwsdio->tx_handler_data = kmalloc(sizeof(*rtwsdio->tx_handler_data),
-					   GFP_KERNEL);
+	rtwsdio->tx_handler_data = kmalloc_obj(*rtwsdio->tx_handler_data);
 	if (!rtwsdio->tx_handler_data)
 		goto err_destroy_wq;
 
@@ -1414,9 +1419,8 @@ void rtw_sdio_remove(struct sdio_func *sdio_func)
 }
 EXPORT_SYMBOL(rtw_sdio_remove);
 
-void rtw_sdio_shutdown(struct device *dev)
+void rtw_sdio_shutdown(struct sdio_func *sdio_func)
 {
-	struct sdio_func *sdio_func = dev_to_sdio_func(dev);
 	const struct rtw_chip_info *chip;
 	struct ieee80211_hw *hw;
 	struct rtw_dev *rtwdev;

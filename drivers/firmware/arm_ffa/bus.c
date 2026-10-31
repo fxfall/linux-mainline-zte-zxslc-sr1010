@@ -192,7 +192,7 @@ bool ffa_device_is_valid(struct ffa_device *ffa_dev)
 
 struct ffa_device *
 ffa_device_register(const struct ffa_partition_info *part_info,
-		    const struct ffa_ops *ops)
+		    const struct ffa_ops *ops, struct device *parent)
 {
 	int id, ret;
 	struct device *dev;
@@ -205,13 +205,14 @@ ffa_device_register(const struct ffa_partition_info *part_info,
 	if (id < 0)
 		return NULL;
 
-	ffa_dev = kzalloc(sizeof(*ffa_dev), GFP_KERNEL);
+	ffa_dev = kzalloc_obj(*ffa_dev);
 	if (!ffa_dev) {
 		ida_free(&ffa_bus_id, id);
 		return NULL;
 	}
 
 	dev = &ffa_dev->dev;
+	dev->parent = parent;
 	dev->bus = &ffa_bus_type;
 	dev->release = ffa_release_device;
 	dev->dma_mask = &dev->coherent_dma_mask;

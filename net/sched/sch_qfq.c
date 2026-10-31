@@ -392,7 +392,7 @@ static int qfq_change_agg(struct Qdisc *sch, struct qfq_class *cl, u32 weight,
 
 	new_agg = qfq_find_agg(q, lmax, weight);
 	if (new_agg == NULL) { /* create new aggregate */
-		new_agg = kzalloc(sizeof(*new_agg), GFP_ATOMIC);
+		new_agg = kzalloc_obj(*new_agg, GFP_ATOMIC);
 		if (new_agg == NULL)
 			return -ENOBUFS;
 		qfq_init_agg(q, new_agg, lmax, weight);
@@ -476,7 +476,7 @@ static int qfq_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
 	}
 
 	/* create and init new class */
-	cl = kzalloc(sizeof(struct qfq_class), GFP_KERNEL);
+	cl = kzalloc_obj(struct qfq_class);
 	if (cl == NULL)
 		return -ENOBUFS;
 
@@ -508,7 +508,7 @@ set_change_agg:
 	new_agg = qfq_find_agg(q, lmax, weight);
 	if (new_agg == NULL) { /* create new aggregate */
 		sch_tree_unlock(sch);
-		new_agg = kzalloc(sizeof(*new_agg), GFP_KERNEL);
+		new_agg = kzalloc_obj(*new_agg);
 		if (new_agg == NULL) {
 			err = -ENOBUFS;
 			gen_kill_estimator(&cl->rate_est);
@@ -709,7 +709,7 @@ static struct qfq_class *qfq_classify(struct sk_buff *skb, struct Qdisc *sch,
 
 	*qerr = NET_XMIT_SUCCESS | __NET_XMIT_BYPASS;
 	fl = rcu_dereference_bh(q->filter_list);
-	result = tcf_classify(skb, NULL, fl, &res, false);
+	result = tcf_classify_qdisc(skb, fl, &res, false);
 	if (result >= 0) {
 #ifdef CONFIG_NET_CLS_ACT
 		switch (result) {
@@ -1152,12 +1152,12 @@ static struct sk_buff *qfq_dequeue(struct Qdisc *sch)
 	if (!skb)
 		return NULL;
 
-	sch->q.qlen--;
+	qdisc_qlen_dec(sch);
 
 	skb = agg_dequeue(in_serv_agg, cl, len);
 
 	if (!skb) {
-		sch->q.qlen++;
+		qdisc_qlen_inc(sch);
 		return NULL;
 	}
 
@@ -1252,7 +1252,7 @@ static int qfq_enqueue(struct sk_buff *skb, struct Qdisc *sch,
 		}
 	}
 
-	gso_segs = skb_is_gso(skb) ? skb_shinfo(skb)->gso_segs : 1;
+	gso_segs = qdisc_pkt_segs(skb);
 	err = qdisc_enqueue(skb, cl->qdisc, to_free);
 	if (unlikely(err != NET_XMIT_SUCCESS)) {
 		pr_debug("qfq_enqueue: enqueue failed %d\n", err);
@@ -1264,8 +1264,8 @@ static int qfq_enqueue(struct sk_buff *skb, struct Qdisc *sch,
 	}
 
 	_bstats_update(&cl->bstats, len, gso_segs);
-	sch->qstats.backlog += len;
-	++sch->q.qlen;
+	qstats_backlog_add(sch, len);
+	qdisc_qlen_inc(sch);
 
 	agg = cl->agg;
 	/* if the class is active, then done here */

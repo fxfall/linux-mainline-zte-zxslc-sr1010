@@ -10,7 +10,6 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
-#include <crypto/skcipher.h>
 #include <linux/module.h>
 #include <linux/net.h>
 #include <linux/overflow.h>
@@ -76,7 +75,7 @@ static int rxrpc_preparse_xdr_rxkad(struct key_preparsed_payload *prep,
 	prep->quotalen += datalen + plen;
 
 	plen -= sizeof(*token);
-	token = kzalloc(sizeof(*token), GFP_KERNEL);
+	token = kzalloc_obj(*token);
 	if (!token)
 		return -ENOMEM;
 
@@ -207,11 +206,11 @@ static int rxrpc_preparse_xdr_yfs_rxgk(struct key_preparsed_payload *prep,
 	prep->quotalen += datalen + plen;
 
 	plen -= sizeof(*token);
-	token = kzalloc(sizeof(*token), GFP_KERNEL);
+	token = kzalloc_obj(*token);
 	if (!token)
 		goto nomem;
 
-	token->rxgk = kzalloc(struct_size_t(struct rxgk_key, _key, raw_keylen), GFP_KERNEL);
+	token->rxgk = kzalloc_flex(struct rxgk_key, _key, raw_keylen);
 	if (!token->rxgk)
 		goto nomem_token;
 
@@ -510,7 +509,7 @@ static int rxrpc_preparse(struct key_preparsed_payload *prep)
 	prep->quotalen += plen + sizeof(*token);
 
 	ret = -ENOMEM;
-	token = kzalloc(sizeof(*token), GFP_KERNEL);
+	token = kzalloc_obj(*token);
 	if (!token)
 		goto error;
 	token->kad = kzalloc(plen, GFP_KERNEL);

@@ -171,7 +171,7 @@ static int i2sbus_add_dev(struct macio_dev *macio,
 	if (strncmp(node_name, "i2s-", 4))
 		return 0;
 
-	dev = kzalloc(sizeof(struct i2sbus_dev), GFP_KERNEL);
+	dev = kzalloc_obj(struct i2sbus_dev);
 	if (!dev)
 		return 0;
 
@@ -240,6 +240,8 @@ static int i2sbus_add_dev(struct macio_dev *macio,
 	}
 	for (i = aoa_resource_i2smmio; i <= aoa_resource_rxdbdma; i++) {
 		int irq = irq_of_parse_and_map(np, i);
+		if (!irq)
+			goto err;
 		if (request_irq(irq, ints[i], 0, dev->rnames[i], dev))
 			goto err;
 		dev->interrupts[i] = irq;

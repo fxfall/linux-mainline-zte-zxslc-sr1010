@@ -216,6 +216,9 @@ static ssize_t ovl_parse_param_split_lowerdirs(char *str)
 		if (*s == '\\') {
 			/* keep esc chars in split lowerdir */
 			*d++ = *s++;
+			/* A trailing backslash escapes nothing. */
+			if (!*s)
+				return -EINVAL;
 		} else if (*s == ':') {
 			bool next_colon = (*(s + 1) == ':');
 
@@ -799,7 +802,7 @@ int ovl_init_fs_context(struct fs_context *fc)
 	struct ovl_fs_context *ctx;
 	struct ovl_fs *ofs;
 
-	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL_ACCOUNT);
+	ctx = kzalloc_obj(*ctx, GFP_KERNEL_ACCOUNT);
 	if (!ctx)
 		return -ENOMEM;
 
@@ -807,12 +810,12 @@ int ovl_init_fs_context(struct fs_context *fc)
 	 * By default we allocate for three lower layers. It's likely
 	 * that it'll cover most users.
 	 */
-	ctx->lower = kmalloc_array(3, sizeof(*ctx->lower), GFP_KERNEL_ACCOUNT);
+	ctx->lower = kmalloc_objs(*ctx->lower, 3, GFP_KERNEL_ACCOUNT);
 	if (!ctx->lower)
 		goto out_err;
 	ctx->capacity = 3;
 
-	ofs = kzalloc(sizeof(struct ovl_fs), GFP_KERNEL);
+	ofs = kzalloc_obj(struct ovl_fs);
 	if (!ofs)
 		goto out_err;
 

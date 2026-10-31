@@ -139,6 +139,7 @@ static int build_constructor_string(struct dm_target *ti,
 		str_size += strlen(argv[i]) + 1; /* +1 for space between args */
 
 	str_size += 20; /* Max number of chars in a printed u64 number */
+	str_size++; /* For NUL-terminator */
 
 	str = kzalloc(str_size, GFP_KERNEL);
 	if (!str) {
@@ -205,7 +206,7 @@ static int userspace_ctr(struct dm_dirty_log *log, struct dm_target *ti,
 		return -EINVAL;
 	}
 
-	lc = kzalloc(sizeof(*lc), GFP_KERNEL);
+	lc = kzalloc_obj(*lc);
 	if (!lc) {
 		DMWARN("Unable to allocate userspace log context.");
 		return -ENOMEM;

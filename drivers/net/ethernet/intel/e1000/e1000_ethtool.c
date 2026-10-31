@@ -499,6 +499,9 @@ static int e1000_set_eeprom(struct net_device *netdev,
 		if (ret_val)
 			goto out;
 
+		/* Device's eeprom is always little-endian, word addressable */
+		le16_to_cpus(&eeprom_buff[0]);
+
 		ptr++;
 	}
 	if ((eeprom->offset + eeprom->len) & 1) {
@@ -509,11 +512,10 @@ static int e1000_set_eeprom(struct net_device *netdev,
 					    &eeprom_buff[last_word - first_word]);
 		if (ret_val)
 			goto out;
-	}
 
-	/* Device's eeprom is always little-endian, word addressable */
-	for (i = 0; i < last_word - first_word + 1; i++)
-		le16_to_cpus(&eeprom_buff[i]);
+		/* Device's eeprom is always little-endian, word addressable */
+		le16_to_cpus(&eeprom_buff[last_word - first_word]);
+	}
 
 	memcpy(ptr, bytes, eeprom->len);
 
@@ -588,13 +590,11 @@ static int e1000_set_ringparam(struct net_device *netdev,
 	rx_old = adapter->rx_ring;
 
 	err = -ENOMEM;
-	txdr = kcalloc(adapter->num_tx_queues, sizeof(struct e1000_tx_ring),
-		       GFP_KERNEL);
+	txdr = kzalloc_objs(struct e1000_tx_ring, adapter->num_tx_queues);
 	if (!txdr)
 		goto err_alloc_tx;
 
-	rxdr = kcalloc(adapter->num_rx_queues, sizeof(struct e1000_rx_ring),
-		       GFP_KERNEL);
+	rxdr = kzalloc_objs(struct e1000_rx_ring, adapter->num_rx_queues);
 	if (!rxdr)
 		goto err_alloc_rx;
 
@@ -990,8 +990,7 @@ static int e1000_setup_desc_rings(struct e1000_adapter *adapter)
 	if (!txdr->count)
 		txdr->count = E1000_DEFAULT_TXD;
 
-	txdr->buffer_info = kcalloc(txdr->count, sizeof(struct e1000_tx_buffer),
-				    GFP_KERNEL);
+	txdr->buffer_info = kzalloc_objs(struct e1000_tx_buffer, txdr->count);
 	if (!txdr->buffer_info) {
 		ret_val = 1;
 		goto err_nomem;
@@ -1049,8 +1048,7 @@ static int e1000_setup_desc_rings(struct e1000_adapter *adapter)
 	if (!rxdr->count)
 		rxdr->count = E1000_DEFAULT_RXD;
 
-	rxdr->buffer_info = kcalloc(rxdr->count, sizeof(struct e1000_rx_buffer),
-				    GFP_KERNEL);
+	rxdr->buffer_info = kzalloc_objs(struct e1000_rx_buffer, rxdr->count);
 	if (!rxdr->buffer_info) {
 		ret_val = 5;
 		goto err_nomem;

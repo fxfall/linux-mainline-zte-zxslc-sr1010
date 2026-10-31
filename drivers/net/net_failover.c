@@ -675,7 +675,7 @@ static int net_failover_slave_name_change(struct net_device *slave_dev,
 	/* We need to bring up the slave after the rename by udev in case
 	 * open failed with EBUSY when it was registered.
 	 */
-	dev_open(slave_dev, NULL);
+	netif_open(slave_dev, NULL);
 
 	return 0;
 }
@@ -818,19 +818,6 @@ void net_failover_destroy(struct failover *failover)
 	free_netdev(failover_dev);
 }
 EXPORT_SYMBOL_GPL(net_failover_destroy);
-
-static __init int
-net_failover_init(void)
-{
-	return 0;
-}
-module_init(net_failover_init);
-
-static __exit
-void net_failover_exit(void)
-{
-}
-module_exit(net_failover_exit);
 
 MODULE_DESCRIPTION("Failover driver for Paravirtual drivers");
 MODULE_LICENSE("GPL v2");

@@ -25,7 +25,6 @@
 #include <linux/errno.h>
 #include <linux/slab.h>
 #include <linux/tty.h>
-#include <linux/tty_driver.h>
 #include <linux/tty_flip.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
@@ -35,7 +34,6 @@
 #include <linux/serial.h>
 #include <linux/kfifo.h>
 #include <linux/delay.h>
-#include <linux/uaccess.h>
 #include <linux/unaligned.h>
 
 #include "cypress_m8.h"
@@ -453,7 +451,7 @@ static int cypress_generic_port_probe(struct usb_serial_port *port)
 	if (port->interrupt_out_size < 8)
 		return -EINVAL;
 
-	priv = kzalloc(sizeof(struct cypress_private), GFP_KERNEL);
+	priv = kzalloc_obj(struct cypress_private);
 	if (!priv)
 		return -ENOMEM;
 

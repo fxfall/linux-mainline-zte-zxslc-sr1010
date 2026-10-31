@@ -17,6 +17,7 @@
 #include <linux/sysfs.h>
 #include <linux/types.h>
 #include <linux/dma/imx-dma.h>
+#include <linux/log2.h>
 #include <sound/dmaengine_pcm.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
@@ -73,6 +74,7 @@ struct fsl_micfil {
 	int irq[MICFIL_IRQ_LINES];
 	enum quality quality;
 	int dc_remover;
+	int dc_out_remover;
 	int vad_init_mode;
 	int vad_enabled;
 	int vad_detected;
@@ -92,6 +94,9 @@ struct fsl_micfil_soc_data {
 	bool volume_sx;
 	u64  formats;
 	int  fifo_offset;
+	enum quality default_quality;
+	/* stores const value in formula to calculate range */
+	int rangeadj_const[3][2];
 };
 
 static struct fsl_micfil_soc_data fsl_micfil_imx8mm = {
@@ -102,6 +107,7 @@ static struct fsl_micfil_soc_data fsl_micfil_imx8mm = {
 	.formats = SNDRV_PCM_FMTBIT_S16_LE,
 	.volume_sx = true,
 	.fifo_offset = 0,
+	.default_quality = QUALITY_VLOW0,
 };
 
 static struct fsl_micfil_soc_data fsl_micfil_imx8mp = {
@@ -112,6 +118,8 @@ static struct fsl_micfil_soc_data fsl_micfil_imx8mp = {
 	.formats = SNDRV_PCM_FMTBIT_S32_LE,
 	.volume_sx = false,
 	.fifo_offset = 0,
+	.default_quality = QUALITY_MEDIUM,
+	.rangeadj_const = {{27, 7}, {27, 7}, {26, 7}},
 };
 
 static struct fsl_micfil_soc_data fsl_micfil_imx93 = {
@@ -124,6 +132,8 @@ static struct fsl_micfil_soc_data fsl_micfil_imx93 = {
 	.use_verid = true,
 	.volume_sx = false,
 	.fifo_offset = 0,
+	.default_quality = QUALITY_MEDIUM,
+	.rangeadj_const = {{30, 6}, {30, 6}, {29, 6}},
 };
 
 static struct fsl_micfil_soc_data fsl_micfil_imx943 = {
@@ -136,6 +146,8 @@ static struct fsl_micfil_soc_data fsl_micfil_imx943 = {
 	.use_verid = true,
 	.volume_sx = false,
 	.fifo_offset = -4,
+	.default_quality = QUALITY_MEDIUM,
+	.rangeadj_const = {{34, 6}, {34, 6}, {33, 6}},
 };
 
 static const struct of_device_id fsl_micfil_dt_ids[] = {
@@ -162,9 +174,77 @@ static const struct soc_enum fsl_micfil_quality_enum =
 
 static DECLARE_TLV_DB_SCALE(gain_tlv, 0, 100, 0);
 
+static int micfil_get_max_range(struct fsl_micfil *micfil)
+{
+	int max_range;
+
+	switch (micfil->quality) {
+	case QUALITY_HIGH:
+	case QUALITY_VLOW0:
+		max_range = micfil->soc->rangeadj_const[0][0] - micfil->soc->rangeadj_const[0][1] *
+			    ilog2(2 * MICFIL_OSR_DEFAULT);
+		break;
+	case QUALITY_MEDIUM:
+	case QUALITY_VLOW1:
+		max_range = micfil->soc->rangeadj_const[1][0] - micfil->soc->rangeadj_const[1][1] *
+			    ilog2(MICFIL_OSR_DEFAULT);
+		break;
+	case QUALITY_LOW:
+	case QUALITY_VLOW2:
+		max_range = micfil->soc->rangeadj_const[2][0] - micfil->soc->rangeadj_const[2][1] *
+			    ilog2(MICFIL_OSR_DEFAULT);
+		break;
+	default:
+		return 0;
+	}
+	max_range = max_range < 0 ? 0 : max_range;
+
+	return max_range;
+}
+
+static int micfil_range_set(struct snd_kcontrol *kcontrol,
+			    struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
+	struct fsl_micfil *micfil = snd_soc_component_get_drvdata(cmpnt);
+	struct soc_mixer_control *mc =
+		(struct soc_mixer_control *)kcontrol->private_value;
+	unsigned int shift = mc->shift;
+	int max_range, new_range;
+	int ret;
+
+	new_range = ucontrol->value.integer.value[0];
+	max_range = micfil_get_max_range(micfil);
+	if (new_range > max_range)
+		dev_warn(&micfil->pdev->dev, "range makes channel %d data unreliable\n", shift / 4);
+
+	ret = pm_runtime_resume_and_get(cmpnt->dev);
+	if (ret)
+		return ret;
+
+	ret = snd_soc_component_update_bits(cmpnt, REG_MICFIL_OUT_CTRL, 0xF << shift,
+					    new_range << shift);
+
+	pm_runtime_put_autosuspend(cmpnt->dev);
+
+	return ret;
+}
+
 static int micfil_set_quality(struct fsl_micfil *micfil)
 {
-	u32 qsel;
+	int range, max_range;
+	u32 qsel, val;
+	int i;
+
+	if (!micfil->soc->volume_sx) {
+		regmap_read(micfil->regmap, REG_MICFIL_OUT_CTRL, &val);
+		max_range = micfil_get_max_range(micfil);
+		for (i = 0; i < micfil->soc->fifos; i++) {
+			range = (val >> MICFIL_OUTGAIN_CHX_SHIFT(i)) & 0xF;
+			if (range > max_range)
+				dev_warn(&micfil->pdev->dev, "please reset channel %d range\n", i);
+		}
+	}
 
 	switch (micfil->quality) {
 	case QUALITY_HIGH:
@@ -197,7 +277,7 @@ static int micfil_set_quality(struct fsl_micfil *micfil)
 static int micfil_quality_get(struct snd_kcontrol *kcontrol,
 			      struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct fsl_micfil *micfil = snd_soc_component_get_drvdata(cmpnt);
 
 	ucontrol->value.integer.value[0] = micfil->quality;
@@ -208,7 +288,7 @@ static int micfil_quality_get(struct snd_kcontrol *kcontrol,
 static int micfil_quality_set(struct snd_kcontrol *kcontrol,
 			      struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct fsl_micfil *micfil = snd_soc_component_get_drvdata(cmpnt);
 	int val = ucontrol->value.integer.value[0];
 	bool change = false;
@@ -268,6 +348,11 @@ static const char * const micfil_dc_remover_texts[] = {
 	"Cut-off @152Hz", "Bypass",
 };
 
+static const char * const micfil_dc_out_remover_texts[] = {
+	"Cut-off @20Hz", "Cut-off @13.3Hz",
+	"Cut-off @40Hz", "Bypass",
+};
+
 static const struct soc_enum hwvad_enable_enum =
 	SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(micfil_hwvad_enable),
 			    micfil_hwvad_enable);
@@ -281,6 +366,9 @@ static const struct soc_enum hwvad_hpf_enum =
 static const struct soc_enum fsl_micfil_dc_remover_enum =
 	SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(micfil_dc_remover_texts),
 			    micfil_dc_remover_texts);
+static const struct soc_enum fsl_micfil_dc_out_remover_enum =
+	SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(micfil_dc_out_remover_texts),
+			    micfil_dc_out_remover_texts);
 
 static int micfil_put_dc_remover_state(struct snd_kcontrol *kcontrol,
 				       struct snd_ctl_elem_value *ucontrol)
@@ -322,6 +410,50 @@ static int micfil_get_dc_remover_state(struct snd_kcontrol *kcontrol,
 	struct fsl_micfil *micfil = snd_soc_component_get_drvdata(comp);
 
 	ucontrol->value.enumerated.item[0] = micfil->dc_remover;
+
+	return 0;
+}
+
+static int micfil_put_dc_out_remover_state(struct snd_kcontrol *kcontrol,
+					   struct snd_ctl_elem_value *ucontrol)
+{
+	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
+	struct snd_soc_component *comp = snd_kcontrol_chip(kcontrol);
+	struct fsl_micfil *micfil = snd_soc_component_get_drvdata(comp);
+	unsigned int *item = ucontrol->value.enumerated.item;
+	int val = snd_soc_enum_item_to_val(e, item[0]);
+	int i = 0, ret = 0;
+	u32 reg_val = 0;
+
+	if (val < 0 || val > 3)
+		return -EINVAL;
+
+	ret = pm_runtime_resume_and_get(comp->dev);
+	if (ret)
+		return ret;
+
+	micfil->dc_out_remover = val;
+
+	/* Calculate total value for all channels */
+	for (i = 0; i < MICFIL_OUTPUT_CHANNELS; i++)
+		reg_val |= val << MICFIL_DC_CHX_SHIFT(i);
+
+	/* Update DC Remover mode for all channels */
+	ret = snd_soc_component_update_bits(comp, REG_MICFIL_DC_OUT_CTRL,
+					    MICFIL_DC_CTRL_CONFIG, reg_val);
+
+	pm_runtime_put_autosuspend(comp->dev);
+
+	return ret;
+}
+
+static int micfil_get_dc_out_remover_state(struct snd_kcontrol *kcontrol,
+					   struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *comp = snd_kcontrol_chip(kcontrol);
+	struct fsl_micfil *micfil = snd_soc_component_get_drvdata(comp);
+
+	ucontrol->value.enumerated.item[0] = micfil->dc_out_remover;
 
 	return 0;
 }
@@ -400,23 +532,31 @@ static int hwvad_detected(struct snd_kcontrol *kcontrol,
 	return 0;
 }
 
-static const struct snd_kcontrol_new fsl_micfil_volume_controls[] = {
-	SOC_SINGLE_TLV("CH0 Volume", REG_MICFIL_OUT_CTRL,
-		       MICFIL_OUTGAIN_CHX_SHIFT(0), 0xF, 0, gain_tlv),
-	SOC_SINGLE_TLV("CH1 Volume", REG_MICFIL_OUT_CTRL,
-		       MICFIL_OUTGAIN_CHX_SHIFT(1), 0xF, 0, gain_tlv),
-	SOC_SINGLE_TLV("CH2 Volume", REG_MICFIL_OUT_CTRL,
-		       MICFIL_OUTGAIN_CHX_SHIFT(2), 0xF, 0, gain_tlv),
-	SOC_SINGLE_TLV("CH3 Volume", REG_MICFIL_OUT_CTRL,
-		       MICFIL_OUTGAIN_CHX_SHIFT(3), 0xF, 0, gain_tlv),
-	SOC_SINGLE_TLV("CH4 Volume", REG_MICFIL_OUT_CTRL,
-		       MICFIL_OUTGAIN_CHX_SHIFT(4), 0xF, 0, gain_tlv),
-	SOC_SINGLE_TLV("CH5 Volume", REG_MICFIL_OUT_CTRL,
-		       MICFIL_OUTGAIN_CHX_SHIFT(5), 0xF, 0, gain_tlv),
-	SOC_SINGLE_TLV("CH6 Volume", REG_MICFIL_OUT_CTRL,
-		       MICFIL_OUTGAIN_CHX_SHIFT(6), 0xF, 0, gain_tlv),
-	SOC_SINGLE_TLV("CH7 Volume", REG_MICFIL_OUT_CTRL,
-		       MICFIL_OUTGAIN_CHX_SHIFT(7), 0xF, 0, gain_tlv),
+static const struct snd_kcontrol_new fsl_micfil_range_controls[] = {
+	SOC_SINGLE_EXT("CH0 Range", REG_MICFIL_OUT_CTRL,
+		       MICFIL_OUTGAIN_CHX_SHIFT(0), 0xF, 0,
+		       snd_soc_get_volsw, micfil_range_set),
+	SOC_SINGLE_EXT("CH1 Range", REG_MICFIL_OUT_CTRL,
+		       MICFIL_OUTGAIN_CHX_SHIFT(1), 0xF, 0,
+		       snd_soc_get_volsw, micfil_range_set),
+	SOC_SINGLE_EXT("CH2 Range", REG_MICFIL_OUT_CTRL,
+		       MICFIL_OUTGAIN_CHX_SHIFT(2), 0xF, 0,
+		       snd_soc_get_volsw, micfil_range_set),
+	SOC_SINGLE_EXT("CH3 Range", REG_MICFIL_OUT_CTRL,
+		       MICFIL_OUTGAIN_CHX_SHIFT(3), 0xF, 0,
+		       snd_soc_get_volsw, micfil_range_set),
+	SOC_SINGLE_EXT("CH4 Range", REG_MICFIL_OUT_CTRL,
+		       MICFIL_OUTGAIN_CHX_SHIFT(4), 0xF, 0,
+		       snd_soc_get_volsw, micfil_range_set),
+	SOC_SINGLE_EXT("CH5 Range", REG_MICFIL_OUT_CTRL,
+		       MICFIL_OUTGAIN_CHX_SHIFT(5), 0xF, 0,
+		       snd_soc_get_volsw, micfil_range_set),
+	SOC_SINGLE_EXT("CH6 Range", REG_MICFIL_OUT_CTRL,
+		       MICFIL_OUTGAIN_CHX_SHIFT(6), 0xF, 0,
+		       snd_soc_get_volsw, micfil_range_set),
+	SOC_SINGLE_EXT("CH7 Range", REG_MICFIL_OUT_CTRL,
+		       MICFIL_OUTGAIN_CHX_SHIFT(7), 0xF, 0,
+		       snd_soc_get_volsw, micfil_range_set),
 };
 
 static const struct snd_kcontrol_new fsl_micfil_volume_sx_controls[] = {
@@ -436,6 +576,11 @@ static const struct snd_kcontrol_new fsl_micfil_volume_sx_controls[] = {
 			  MICFIL_OUTGAIN_CHX_SHIFT(6), 0x8, 0xF, gain_tlv),
 	SOC_SINGLE_SX_TLV("CH7 Volume", REG_MICFIL_OUT_CTRL,
 			  MICFIL_OUTGAIN_CHX_SHIFT(7), 0x8, 0xF, gain_tlv),
+};
+
+static const struct snd_kcontrol_new fsl_micfil_dc_out_controls[] = {
+	SOC_ENUM_EXT("MICFIL DC Out Remover Control", fsl_micfil_dc_out_remover_enum,
+		     micfil_get_dc_out_remover_state, micfil_put_dc_out_remover_state),
 };
 
 static const struct snd_kcontrol_new fsl_micfil_snd_controls[] = {
@@ -808,12 +953,17 @@ static int fsl_micfil_reparent_rootclk(struct fsl_micfil *micfil, unsigned int s
 	/* Get root clock */
 	clk = micfil->mclk;
 
-	/* Disable clock first, for it was enabled by pm_runtime */
+	/* Reparent root clock to the PLL matching this sample rate */
 	fsl_asoc_reparent_pll_clocks(dev, clk, micfil->pll8k_clk,
 				     micfil->pll11k_clk, ratio);
-	ret = clk_prepare_enable(clk);
-	if (ret)
-		return ret;
+
+	/* Enable only once; hw_params can be called multiple times */
+	if (!micfil->mclk_flag) {
+		ret = clk_prepare_enable(clk);
+		if (ret)
+			return ret;
+		micfil->mclk_flag = true;
+	}
 
 	return 0;
 }
@@ -845,8 +995,6 @@ static int fsl_micfil_hw_params(struct snd_pcm_substream *substream,
 	ret = fsl_micfil_reparent_rootclk(micfil, rate);
 	if (ret)
 		return ret;
-
-	micfil->mclk_flag = true;
 
 	/* floor(K * CLKDIV) */
 	switch (micfil->quality) {
@@ -923,8 +1071,10 @@ static int fsl_micfil_hw_free(struct snd_pcm_substream *substream,
 {
 	struct fsl_micfil *micfil = snd_soc_dai_get_drvdata(dai);
 
-	clk_disable_unprepare(micfil->mclk);
-	micfil->mclk_flag = false;
+	if (micfil->mclk_flag) {
+		clk_disable_unprepare(micfil->mclk);
+		micfil->mclk_flag = false;
+	}
 
 	return 0;
 }
@@ -934,13 +1084,20 @@ static int fsl_micfil_dai_probe(struct snd_soc_dai *cpu_dai)
 	struct fsl_micfil *micfil = dev_get_drvdata(cpu_dai->dev);
 	struct device *dev = cpu_dai->dev;
 	unsigned int val = 0;
-	int ret, i;
+	int ret, i, max_range;
 
-	micfil->quality = QUALITY_VLOW0;
+	micfil->quality = micfil->soc->default_quality;
 	micfil->card = cpu_dai->component->card;
 
 	/* set default gain to 2 */
-	regmap_write(micfil->regmap, REG_MICFIL_OUT_CTRL, 0x22222222);
+	if (micfil->soc->volume_sx) {
+		regmap_write(micfil->regmap, REG_MICFIL_OUT_CTRL, 0x22222222);
+	} else {
+		max_range = micfil_get_max_range(micfil);
+		for (i = 1; i < micfil->soc->fifos; i++)
+			max_range |= max_range << 4;
+		regmap_write(micfil->regmap, REG_MICFIL_OUT_CTRL, max_range);
+	}
 
 	/* set DC Remover in bypass mode*/
 	for (i = 0; i < MICFIL_OUTPUT_CHANNELS; i++)
@@ -952,6 +1109,19 @@ static int fsl_micfil_dai_probe(struct snd_soc_dai *cpu_dai)
 		return ret;
 	}
 	micfil->dc_remover = MICFIL_DC_BYPASS;
+
+	if (micfil->soc->use_verid) {
+		val = 0;
+		for (i = 0; i < MICFIL_OUTPUT_CHANNELS; i++)
+			val |= MICFIL_DC_BYPASS << MICFIL_DC_CHX_SHIFT(i);
+		ret = regmap_update_bits(micfil->regmap, REG_MICFIL_DC_OUT_CTRL,
+					 MICFIL_DC_CTRL_CONFIG, val);
+		if (ret) {
+			dev_err(dev, "failed to set DC OUT Remover mode bits\n");
+			return ret;
+		}
+		micfil->dc_out_remover = MICFIL_DC_BYPASS;
+	}
 
 	snd_soc_dai_init_dma_data(cpu_dai, NULL,
 				  &micfil->dma_params_rx);
@@ -974,8 +1144,12 @@ static int fsl_micfil_component_probe(struct snd_soc_component *component)
 		snd_soc_add_component_controls(component, fsl_micfil_volume_sx_controls,
 					       ARRAY_SIZE(fsl_micfil_volume_sx_controls));
 	else
-		snd_soc_add_component_controls(component, fsl_micfil_volume_controls,
-					       ARRAY_SIZE(fsl_micfil_volume_controls));
+		snd_soc_add_component_controls(component, fsl_micfil_range_controls,
+					       ARRAY_SIZE(fsl_micfil_range_controls));
+
+	if (micfil->soc->use_verid)
+		snd_soc_add_component_controls(component, fsl_micfil_dc_out_controls,
+					       ARRAY_SIZE(fsl_micfil_dc_out_controls));
 
 	return 0;
 }
@@ -1023,6 +1197,7 @@ static const struct reg_default fsl_micfil_reg_defaults[] = {
 	{REG_MICFIL_DATACH6,		0x00000000},
 	{REG_MICFIL_DATACH7,		0x00000000},
 	{REG_MICFIL_DC_CTRL,		0x00000000},
+	{REG_MICFIL_DC_OUT_CTRL,	0x00000000},
 	{REG_MICFIL_OUT_CTRL,		0x00000000},
 	{REG_MICFIL_OUT_STAT,		0x00000000},
 	{REG_MICFIL_VAD0_CTRL1,		0x00000000},
@@ -1049,6 +1224,7 @@ static const struct reg_default fsl_micfil_reg_defaults_v2[] = {
 	{REG_MICFIL_DATACH6 - 0x4,	0x00000000},
 	{REG_MICFIL_DATACH7 - 0x4,	0x00000000},
 	{REG_MICFIL_DC_CTRL,		0x00000000},
+	{REG_MICFIL_DC_OUT_CTRL,	0x00000000},
 	{REG_MICFIL_OUT_CTRL,		0x00000000},
 	{REG_MICFIL_OUT_STAT,		0x00000000},
 	{REG_MICFIL_VAD0_CTRL1,		0x00000000},
@@ -1085,6 +1261,7 @@ static bool fsl_micfil_readable_reg(struct device *dev, unsigned int reg)
 	case REG_MICFIL_VAD0_NDATA:
 	case REG_MICFIL_VAD0_ZCD:
 		return true;
+	case REG_MICFIL_DC_OUT_CTRL:
 	case REG_MICFIL_FSYNC_CTRL:
 	case REG_MICFIL_VERID:
 	case REG_MICFIL_PARAM:
@@ -1116,6 +1293,7 @@ static bool fsl_micfil_writeable_reg(struct device *dev, unsigned int reg)
 	case REG_MICFIL_VAD0_NCONFIG:
 	case REG_MICFIL_VAD0_ZCD:
 		return true;
+	case REG_MICFIL_DC_OUT_CTRL:
 	case REG_MICFIL_FSYNC_CTRL:
 		if (micfil->soc->use_verid)
 			return true;

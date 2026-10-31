@@ -11,6 +11,7 @@
 
 #include <linux/module.h>
 #include <linux/blkdev.h>
+#include <linux/fs_struct.h>
 
 #include "rnbd-srv.h"
 #include "rnbd-srv-trace.h"
@@ -128,7 +129,7 @@ static int process_rdma(struct rnbd_srv_session *srv_sess,
 
 	trace_process_rdma(srv_sess, msg, id, datalen, usrlen);
 
-	priv = kmalloc(sizeof(*priv), GFP_KERNEL);
+	priv = kmalloc_obj(*priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -287,7 +288,7 @@ static int create_sess(struct rtrs_srv_sess *rtrs)
 
 		return err;
 	}
-	srv_sess = kzalloc(sizeof(*srv_sess), GFP_KERNEL);
+	srv_sess = kzalloc_obj(*srv_sess);
 	if (!srv_sess)
 		return -ENOMEM;
 
@@ -422,7 +423,7 @@ static struct rnbd_srv_sess_dev
 	struct rnbd_srv_sess_dev *sess_dev;
 	int error;
 
-	sess_dev = kzalloc(sizeof(*sess_dev), GFP_KERNEL);
+	sess_dev = kzalloc_obj(*sess_dev);
 	if (!sess_dev)
 		return ERR_PTR(-ENOMEM);
 
@@ -441,7 +442,7 @@ static struct rnbd_srv_dev *rnbd_srv_init_srv_dev(struct block_device *bdev)
 {
 	struct rnbd_srv_dev *dev;
 
-	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
+	dev = kzalloc_obj(*dev);
 	if (!dev)
 		return ERR_PTR(-ENOMEM);
 
@@ -734,7 +735,8 @@ static int process_msg_open(struct rnbd_srv_session *srv_sess,
 		goto reject;
 	}
 
-	bdev_file = bdev_file_open_by_path(full_path, open_flags, NULL, NULL);
+	scoped_with_init_fs()
+		bdev_file = bdev_file_open_by_path(full_path, open_flags, NULL, NULL);
 	if (IS_ERR(bdev_file)) {
 		ret = PTR_ERR(bdev_file);
 		pr_err("Opening device '%s' on session %s failed, failed to open the block device, err: %pe\n",

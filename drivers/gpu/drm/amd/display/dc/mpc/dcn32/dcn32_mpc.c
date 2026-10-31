@@ -884,6 +884,7 @@ void mpc32_set_3dlut_mode(
 		bool is_lut_size17x17x17,
 		uint32_t mpcc_id)
 {
+	(void)is_color_channel_12bits;
 	uint32_t lut_mode;
 	struct dcn30_mpc *mpc30 = TO_DCN30_MPC(mpc);
 
@@ -1019,6 +1020,7 @@ static const struct mpc_funcs dcn32_mpc_funcs = {
 	.release_rmu = NULL,
 	.power_on_mpc_mem_pwr = mpc3_power_on_ogam_lut,
 	.get_mpc_out_mux = mpc1_get_mpc_out_mux,
+	.mpc_read_reg_state = mpc3_read_reg_state,
 	.set_bg_color = mpc1_set_bg_color,
 };
 

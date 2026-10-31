@@ -777,13 +777,11 @@ int ipmi_smi_watcher_register(struct ipmi_smi_watcher *watcher)
 	list_for_each_entry(intf, &ipmi_interfaces, link)
 		count++;
 	if (count > 0) {
-		interfaces = kmalloc_array(count, sizeof(*interfaces),
-					   GFP_KERNEL);
+		interfaces = kmalloc_objs(*interfaces, count);
 		if (!interfaces) {
 			rv = -ENOMEM;
 		} else {
-			devices = kmalloc_array(count, sizeof(*devices),
-						GFP_KERNEL);
+			devices = kmalloc_objs(*devices, count);
 			if (!devices) {
 				kfree(interfaces);
 				interfaces = NULL;
@@ -989,7 +987,7 @@ static int deliver_response(struct ipmi_smi *intf, struct ipmi_recv_msg *msg)
 		mutex_lock(&intf->user_msgs_mutex);
 		list_add_tail(&msg->link, &intf->user_msgs);
 		mutex_unlock(&intf->user_msgs_mutex);
-		queue_work(system_wq, &intf->smi_work);
+		queue_work(system_percpu_wq, &intf->smi_work);
 	}
 
 	return rv;
@@ -1393,6 +1391,7 @@ static void _ipmi_destroy_user(struct ipmi_user *user)
 		}
 	}
 	mutex_unlock(&intf->cmd_rcvrs_mutex);
+	synchronize_rcu();
 	while (rcvrs) {
 		rcvr = rcvrs;
 		rcvrs = rcvr->next;
@@ -1612,13 +1611,11 @@ int ipmi_set_gets_events(struct ipmi_user *user, bool val)
 {
 	struct ipmi_smi      *intf = user->intf;
 	struct ipmi_recv_msg *msg, *msg2;
-	struct list_head     msgs;
+	LIST_HEAD(msgs);
 
 	user = acquire_ipmi_user(user);
 	if (!user)
 		return -ENODEV;
-
-	INIT_LIST_HEAD(&msgs);
 
 	mutex_lock(&intf->events_mutex);
 	if (user->gets_events == val)
@@ -1702,7 +1699,7 @@ int ipmi_register_for_cmd(struct ipmi_user *user,
 	if (!user)
 		return -ENODEV;
 
-	rcvr = kmalloc(sizeof(*rcvr), GFP_KERNEL);
+	rcvr = kmalloc_obj(*rcvr);
 	if (!rcvr) {
 		rv = -ENOMEM;
 		goto out_release;
@@ -2349,6 +2346,10 @@ static int i_ipmi_request(struct ipmi_user     *user,
 		if (smi_msg == NULL) {
 			if (!supplied_recv)
 				ipmi_free_recv_msg(recv_msg);
+			else if (recv_msg->user) {
+				atomic_dec(&recv_msg->user->nr_msgs);
+				kref_put(&recv_msg->user->refcount, free_ipmi_user);
+			}
 			return -ENOMEM;
 		}
 	}
@@ -2422,6 +2423,10 @@ out_err:
 			ipmi_free_smi_msg(smi_msg);
 		if (!supplied_recv)
 			ipmi_free_recv_msg(recv_msg);
+		else if (recv_msg->user) {
+			atomic_dec(&recv_msg->user->nr_msgs);
+			kref_put(&recv_msg->user->refcount, free_ipmi_user);
+		}
 	}
 	return rv;
 }
@@ -3191,7 +3196,7 @@ static int __ipmi_bmc_register(struct ipmi_smi *intf,
 			 bmc->id.product_id,
 			 bmc->id.device_id);
 	} else {
-		bmc = kzalloc(sizeof(*bmc), GFP_KERNEL);
+		bmc = kzalloc_obj(*bmc);
 		if (!bmc) {
 			rv = -ENOMEM;
 			goto out;
@@ -3297,6 +3302,7 @@ out_list_del:
 	list_del(&intf->bmc_link);
 	mutex_unlock(&bmc->dyn_mutex);
 	intf->bmc = &intf->tmp_bmc;
+	ida_free(&ipmi_bmc_ida, bmc->pdev.id);
 	put_device(&bmc->pdev.dev);
 	goto out;
 }
@@ -3495,6 +3501,10 @@ static int __scan_channels(struct ipmi_smi *intf,
 		intf->channels_ready = false;
 	}
 
+	/* Skip channel scan if channels are already marked ready */
+	if (intf->channels_ready)
+		return 0;
+
 	if (ipmi_version_major(id) > 1
 			|| (ipmi_version_major(id) == 1
 			    && ipmi_version_minor(id) >= 5)) {
@@ -3623,7 +3633,7 @@ int ipmi_add_smi(struct module         *owner,
 	if (rv)
 		return rv;
 
-	intf = kzalloc(sizeof(*intf), GFP_KERNEL);
+	intf = kzalloc_obj(*intf);
 	if (!intf)
 		return -ENOMEM;
 
@@ -3732,6 +3742,7 @@ int ipmi_add_smi(struct module         *owner,
 	sysfs_attr_init(&intf->maintenance_mode_devattr.attr);
 	rv = device_create_file(intf->si_dev, &intf->maintenance_mode_devattr);
 	if (rv) {
+		device_remove_file(intf->si_dev, &intf->nr_msgs_devattr);
 		device_remove_file(intf->si_dev, &intf->nr_users_devattr);
 		goto out_err_bmc_reg;
 	}
@@ -3749,12 +3760,14 @@ int ipmi_add_smi(struct module         *owner,
  out_err_bmc_reg:
 	ipmi_bmc_unregister(intf);
  out_err_started:
+	intf->in_shutdown = true;
 	if (intf->handlers->shutdown)
 		intf->handlers->shutdown(intf->send_info);
  out_err:
 	list_del(&intf->link);
 	mutex_unlock(&ipmi_interfaces_mutex);
 	mutex_unlock(&smi_watchers_mutex);
+	cancel_work_sync(&intf->smi_work);
 	kref_put(&intf->refcount, intf_free);
 
 	return rv;
@@ -3783,10 +3796,9 @@ static void cleanup_smi_msgs(struct ipmi_smi *intf)
 	struct seq_table *ent;
 	struct ipmi_smi_msg *msg;
 	struct list_head *entry;
-	struct list_head tmplist;
+	LIST_HEAD(tmplist);
 
 	/* Clear out our transmit queues and hold the messages. */
-	INIT_LIST_HEAD(&tmplist);
 	list_splice_tail(&intf->hp_xmit_msgs, &tmplist);
 	list_splice_tail(&intf->xmit_msgs, &tmplist);
 
@@ -4440,7 +4452,7 @@ static int handle_read_event_rsp(struct ipmi_smi *intf,
 				 struct ipmi_smi_msg *msg)
 {
 	struct ipmi_recv_msg *recv_msg, *recv_msg2;
-	struct list_head     msgs;
+	LIST_HEAD(msgs);
 	struct ipmi_user     *user;
 	int rv = 0, deliver_count = 0;
 
@@ -4454,8 +4466,6 @@ static int handle_read_event_rsp(struct ipmi_smi *intf,
 		/* An error getting the event, just ignore it. */
 		return 0;
 	}
-
-	INIT_LIST_HEAD(&msgs);
 
 	mutex_lock(&intf->events_mutex);
 
@@ -4475,10 +4485,8 @@ static int handle_read_event_rsp(struct ipmi_smi *intf,
 			mutex_unlock(&intf->users_mutex);
 			list_for_each_entry_safe(recv_msg, recv_msg2, &msgs,
 						 link) {
-				user = recv_msg->user;
 				list_del(&recv_msg->link);
 				ipmi_free_recv_msg(recv_msg);
-				kref_put(&user->refcount, free_ipmi_user);
 			}
 			/*
 			 * We couldn't allocate memory for the
@@ -4975,7 +4983,7 @@ void ipmi_smi_msg_received(struct ipmi_smi *intf,
 	if (run_to_completion)
 		smi_work(&intf->smi_work);
 	else
-		queue_work(system_wq, &intf->smi_work);
+		queue_work(system_percpu_wq, &intf->smi_work);
 }
 EXPORT_SYMBOL(ipmi_smi_msg_received);
 
@@ -4985,7 +4993,7 @@ void ipmi_smi_watchdog_pretimeout(struct ipmi_smi *intf)
 		return;
 
 	atomic_set(&intf->watchdog_pretimeouts_to_deliver, 1);
-	queue_work(system_wq, &intf->smi_work);
+	queue_work(system_percpu_wq, &intf->smi_work);
 }
 EXPORT_SYMBOL(ipmi_smi_watchdog_pretimeout);
 
@@ -5099,7 +5107,7 @@ static void check_msg_timeout(struct ipmi_smi *intf, struct seq_table *ent,
 static bool ipmi_timeout_handler(struct ipmi_smi *intf,
 				 unsigned long timeout_period)
 {
-	struct list_head     timeouts;
+	LIST_HEAD(timeouts);
 	struct ipmi_recv_msg *msg, *msg2;
 	unsigned long        flags;
 	int                  i;
@@ -5118,7 +5126,6 @@ static bool ipmi_timeout_handler(struct ipmi_smi *intf,
 	 * have timed out, putting them in the timeouts
 	 * list.
 	 */
-	INIT_LIST_HEAD(&timeouts);
 	mutex_lock(&intf->seq_lock);
 	if (intf->ipmb_maintenance_mode_timeout) {
 		if (intf->ipmb_maintenance_mode_timeout <= timeout_period)
@@ -5160,7 +5167,7 @@ static bool ipmi_timeout_handler(struct ipmi_smi *intf,
 				       flags);
 	}
 
-	queue_work(system_wq, &intf->smi_work);
+	queue_work(system_percpu_wq, &intf->smi_work);
 
 	return need_timer;
 }
@@ -5216,7 +5223,7 @@ static void ipmi_timeout(struct timer_list *unused)
 	if (atomic_read(&stop_operation))
 		return;
 
-	queue_work(system_wq, &ipmi_timer_work);
+	queue_work(system_percpu_wq, &ipmi_timer_work);
 }
 
 static void need_waiter(struct ipmi_smi *intf)
@@ -5240,7 +5247,7 @@ static void free_smi_msg(struct ipmi_smi_msg *msg)
 struct ipmi_smi_msg *ipmi_alloc_smi_msg(void)
 {
 	struct ipmi_smi_msg *rv;
-	rv = kmalloc(sizeof(struct ipmi_smi_msg), GFP_ATOMIC);
+	rv = kmalloc_obj(struct ipmi_smi_msg, GFP_ATOMIC);
 	if (rv) {
 		rv->done = free_smi_msg;
 		rv->recv_msg = NULL;
@@ -5270,7 +5277,7 @@ static struct ipmi_recv_msg *ipmi_alloc_recv_msg(struct ipmi_user *user)
 		}
 	}
 
-	rv = kmalloc(sizeof(struct ipmi_recv_msg), GFP_ATOMIC);
+	rv = kmalloc_obj(struct ipmi_recv_msg, GFP_ATOMIC);
 	if (!rv) {
 		if (user)
 			atomic_dec(&user->nr_msgs);

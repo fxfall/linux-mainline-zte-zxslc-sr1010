@@ -1573,7 +1573,7 @@ int i40e_setup_rx_descriptors(struct i40e_ring *rx_ring)
 	rx_ring->xdp_prog = rx_ring->vsi->xdp_prog;
 
 	rx_ring->rx_bi =
-		kcalloc(rx_ring->count, sizeof(*rx_ring->rx_bi), GFP_KERNEL);
+		kzalloc_objs(*rx_ring->rx_bi, rx_ring->count);
 	if (!rx_ring->rx_bi)
 		return -ENOMEM;
 
@@ -3129,7 +3129,7 @@ static int i40e_tso(struct i40e_tx_buffer *first, u8 *hdr_len,
 					 SKB_GSO_UDP_TUNNEL_CSUM)) {
 		if (!(skb_shinfo(skb)->gso_type & SKB_GSO_PARTIAL) &&
 		    (skb_shinfo(skb)->gso_type & SKB_GSO_UDP_TUNNEL_CSUM)) {
-			l4.udp->len = 0;
+			udp_set_len_short(l4.udp, 0);
 
 			/* determine offset of outer transport header */
 			l4_offset = l4.hdr - skb->data;

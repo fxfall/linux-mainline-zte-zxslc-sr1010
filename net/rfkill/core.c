@@ -293,7 +293,7 @@ static void rfkill_send_events(struct rfkill *rfkill, enum rfkill_operation op)
 	struct rfkill_int_event *ev;
 
 	list_for_each_entry(data, &rfkill_fds, list) {
-		ev = kzalloc(sizeof(*ev), GFP_KERNEL);
+		ev = kzalloc_obj(*ev);
 		if (!ev)
 			continue;
 		if (rfkill_fill_event(ev, rfkill, data, op)) {
@@ -1000,6 +1000,7 @@ struct rfkill * __must_check rfkill_alloc(const char *name,
 {
 	struct rfkill *rfkill;
 	struct device *dev;
+	size_t name_len;
 
 	if (WARN_ON(!ops))
 		return NULL;
@@ -1013,14 +1014,15 @@ struct rfkill * __must_check rfkill_alloc(const char *name,
 	if (WARN_ON(type == RFKILL_TYPE_ALL || type >= NUM_RFKILL_TYPES))
 		return NULL;
 
-	rfkill = kzalloc(sizeof(*rfkill) + strlen(name) + 1, GFP_KERNEL);
+	name_len = strlen(name);
+	rfkill = kzalloc(sizeof(*rfkill) + name_len + 1, GFP_KERNEL);
 	if (!rfkill)
 		return NULL;
 
 	spin_lock_init(&rfkill->lock);
 	INIT_LIST_HEAD(&rfkill->node);
 	rfkill->type = type;
-	strcpy(rfkill->name, name);
+	memcpy(rfkill->name, name, name_len);
 	rfkill->ops = ops;
 	rfkill->data = ops_data;
 
@@ -1179,7 +1181,7 @@ static int rfkill_fop_open(struct inode *inode, struct file *file)
 	struct rfkill *rfkill;
 	struct rfkill_int_event *ev, *tmp;
 
-	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	data = kzalloc_obj(*data);
 	if (!data)
 		return -ENOMEM;
 
@@ -1196,7 +1198,7 @@ static int rfkill_fop_open(struct inode *inode, struct file *file)
 	 */
 
 	list_for_each_entry(rfkill, &rfkill_list, node) {
-		ev = kzalloc(sizeof(*ev), GFP_KERNEL);
+		ev = kzalloc_obj(*ev);
 		if (!ev)
 			goto free;
 		rfkill_sync(rfkill);

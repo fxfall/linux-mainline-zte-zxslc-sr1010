@@ -889,9 +889,12 @@ error_unlock:
 v4l2_error:
 	v4l2_device_unregister(&uvc->v4l2_dev);
 error:
-	if (uvc->control_req)
+	if (uvc->control_req) {
 		usb_ep_free_request(cdev->gadget->ep0, uvc->control_req);
+		uvc->control_req = NULL;
+	}
 	kfree(uvc->control_buf);
+	uvc->control_buf = NULL;
 
 	usb_free_all_descriptors(f);
 	return ret;
@@ -918,7 +921,7 @@ static struct usb_function_instance *uvc_alloc_inst(void)
 	struct uvc_descriptor_header **ctl_cls;
 	int ret;
 
-	opts = kzalloc(sizeof(*opts), GFP_KERNEL);
+	opts = kzalloc_obj(*opts);
 	if (!opts)
 		return ERR_PTR(-ENOMEM);
 	opts->func_inst.free_func_inst = uvc_free_inst;
@@ -1075,7 +1078,9 @@ static void uvc_function_unbind(struct usb_configuration *c,
 	uvc->vdev_release_done = NULL;
 
 	usb_ep_free_request(cdev->gadget->ep0, uvc->control_req);
+	uvc->control_req = NULL;
 	kfree(uvc->control_buf);
+	uvc->control_buf = NULL;
 
 	usb_free_all_descriptors(f);
 }
@@ -1087,7 +1092,7 @@ static struct usb_function *uvc_alloc(struct usb_function_instance *fi)
 	struct uvc_descriptor_header **strm_cls;
 	struct config_item *streaming, *header, *h;
 
-	uvc = kzalloc(sizeof(*uvc), GFP_KERNEL);
+	uvc = kzalloc_obj(*uvc);
 	if (uvc == NULL)
 		return ERR_PTR(-ENOMEM);
 

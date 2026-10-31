@@ -68,7 +68,7 @@ static int rmnet_register_real_device(struct net_device *real_dev,
 		return 0;
 	}
 
-	port = kzalloc(sizeof(*port), GFP_KERNEL);
+	port = kzalloc_obj(*port);
 	if (!port)
 		return -ENOMEM;
 
@@ -143,7 +143,7 @@ static int rmnet_newlink(struct net_device *dev,
 		return -ENODEV;
 	}
 
-	ep = kzalloc(sizeof(*ep), GFP_KERNEL);
+	ep = kzalloc_obj(*ep);
 	if (!ep)
 		return -ENOMEM;
 
@@ -423,7 +423,8 @@ struct rmnet_endpoint *rmnet_get_endpoint(struct rmnet_port *port, u8 mux_id)
 {
 	struct rmnet_endpoint *ep;
 
-	hlist_for_each_entry_rcu(ep, &port->muxed_ep[mux_id], hlnode) {
+	hlist_for_each_entry_rcu(ep, &port->muxed_ep[mux_id], hlnode,
+				 lockdep_rtnl_is_held()) {
 		if (ep->mux_id == mux_id)
 			return ep;
 	}

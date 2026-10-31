@@ -372,7 +372,7 @@ void __init efi_reserve_boot_services(void)
 		 * doesn't make sense as far as the firmware is
 		 * concerned, but it does provide us with a way to tag
 		 * those regions that must not be paired with
-		 * memblock_free_late().
+		 * memblock_phys_free().
 		 */
 		md->attribute |= EFI_MEMORY_RUNTIME;
 	}
@@ -832,12 +832,5 @@ void efi_crash_gracefully_on_page_fault(unsigned long phys_addr,
 	clear_bit(EFI_RUNTIME_SERVICES, &efi.flags);
 	pr_info("Froze efi_rts_wq and disabled EFI Runtime Services\n");
 
-	/*
-	 * Call schedule() in an infinite loop, so that any spurious wake ups
-	 * will never run efi_rts_wq again.
-	 */
-	for (;;) {
-		set_current_state(TASK_IDLE);
-		schedule();
-	}
+	efi_rts_park_worker();
 }

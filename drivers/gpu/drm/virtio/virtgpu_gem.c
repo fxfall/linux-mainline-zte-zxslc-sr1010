@@ -45,7 +45,7 @@ static int virtio_gpu_gem_create(struct drm_file *file,
 
 	ret = drm_gem_handle_create(file, &obj->base.base, &handle);
 	if (ret) {
-		drm_gem_object_release(&obj->base.base);
+		drm_gem_object_put(&obj->base.base);
 		return ret;
 	}
 
@@ -139,13 +139,15 @@ void virtio_gpu_gem_object_close(struct drm_gem_object *obj,
 	if (!vgdev->has_virgl_3d)
 		return;
 
-	objs = virtio_gpu_array_alloc(1);
-	if (!objs)
-		return;
-	virtio_gpu_array_add_obj(objs, obj);
+	if (vfpriv->context_created) {
+		objs = virtio_gpu_array_alloc(1);
+		if (!objs)
+			return;
+		virtio_gpu_array_add_obj(objs, obj);
 
-	virtio_gpu_cmd_context_detach_resource(vgdev, vfpriv->ctx_id,
-					       objs);
+		virtio_gpu_cmd_context_detach_resource(vgdev, vfpriv->ctx_id,
+						       objs);
+	}
 	virtio_gpu_notify(vgdev);
 }
 
@@ -154,7 +156,7 @@ struct virtio_gpu_object_array *virtio_gpu_panic_array_alloc(void)
 {
 	struct virtio_gpu_object_array *objs;
 
-	objs = kmalloc(sizeof(struct virtio_gpu_object_array), GFP_ATOMIC);
+	objs = kmalloc_obj(struct virtio_gpu_object_array, GFP_ATOMIC);
 	if (!objs)
 		return NULL;
 
@@ -167,7 +169,7 @@ struct virtio_gpu_object_array *virtio_gpu_array_alloc(u32 nents)
 {
 	struct virtio_gpu_object_array *objs;
 
-	objs = kmalloc(struct_size(objs, objs, nents), GFP_KERNEL);
+	objs = kmalloc_flex(*objs, objs, nents);
 	if (!objs)
 		return NULL;
 

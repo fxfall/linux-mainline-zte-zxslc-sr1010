@@ -91,8 +91,12 @@ static void icrdma_iidc_event_handler(struct iidc_rdma_core_dev_info *cdev_info,
 			}
 		}
 		if (event->reg & IRDMAPFINT_OICR_HMC_ERR_M) {
-			ibdev_err(&iwdev->ibdev, "HMC Error\n");
-			iwdev->rf->reset = true;
+			u32 hmc_errinfo = readl(iwdev->rf->sc_dev.hw_regs[IRDMA_PFHMC_ERRORINFO]);
+			u32 hmc_errdata = readl(iwdev->rf->sc_dev.hw_regs[IRDMA_PFHMC_ERRORDATA]);
+
+			/* Log diagnostics; do not reset here. */
+			ibdev_warn(&iwdev->ibdev, "HMC Error: errinfo=0x%08x errdata=0x%08x\n",
+				   hmc_errinfo, hmc_errdata);
 		}
 		if (event->reg & IRDMAPFINT_OICR_PE_PUSH_M) {
 			ibdev_err(&iwdev->ibdev, "PE Push Error\n");
@@ -167,8 +171,7 @@ static int icrdma_init_interrupts(struct irdma_pci_f *rf, struct iidc_rdma_core_
 	int i;
 
 	rf->msix_count = num_online_cpus() + IRDMA_NUM_AEQ_MSIX;
-	rf->msix_entries = kcalloc(rf->msix_count, sizeof(*rf->msix_entries),
-				   GFP_KERNEL);
+	rf->msix_entries = kzalloc_objs(*rf->msix_entries, rf->msix_count);
 	if (!rf->msix_entries)
 		return -ENOMEM;
 
@@ -258,7 +261,7 @@ static int icrdma_probe(struct auxiliary_device *aux_dev, const struct auxiliary
 	iwdev = ib_alloc_device(irdma_device, ibdev);
 	if (!iwdev)
 		return -ENOMEM;
-	iwdev->rf = kzalloc(sizeof(*rf), GFP_KERNEL);
+	iwdev->rf = kzalloc_obj(*rf);
 	if (!iwdev->rf) {
 		ib_dealloc_device(&iwdev->ibdev);
 		return -ENOMEM;

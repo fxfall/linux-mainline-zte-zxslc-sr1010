@@ -81,14 +81,14 @@ static int sg_proc_init(void);
 
 #define SG_DEFAULT_TIMEOUT mult_frac(SG_DEFAULT_TIMEOUT_USER, HZ, USER_HZ)
 
-static int sg_big_buff = SG_DEF_RESERVED_SIZE;
 /* N.B. This variable is readable and writeable via
-   /proc/scsi/sg/def_reserved_size . Each time sg_open() is called a buffer
-   of this size (or less if there is not enough memory) will be reserved
-   for use by this file descriptor. [Deprecated usage: this variable is also
-   readable via /proc/sys/kernel/sg-big-buff if the sg driver is built into
-   the kernel (i.e. it is not a module).] */
-static int def_reserved_size = -1;	/* picks up init parameter */
+ * /proc/scsi/sg/def_reserved_size . Each time sg_open() is called a buffer
+ * of this size (or less if there is not enough memory) will be reserved
+ * for use by this file descriptor.
+ */
+
+/* picks up init parameter */
+static int def_reserved_size = SG_DEF_RESERVED_SIZE;
 static int sg_allow_dio = SG_ALLOW_DIO_DEF;
 
 static int scatter_elem_sz = SG_SCATTER_SZ;
@@ -177,7 +177,8 @@ typedef struct sg_device { /* holds the state of each scsi generic device */
 } Sg_device;
 
 /* tasklet or soft irq callback */
-static enum rq_end_io_ret sg_rq_end_io(struct request *rq, blk_status_t status);
+static enum rq_end_io_ret sg_rq_end_io(struct request *rq, blk_status_t status,
+				       const struct io_comp_batch *iob);
 static int sg_start_req(Sg_request *srp, unsigned char *cmd);
 static int sg_finish_rem_req(Sg_request * srp);
 static int sg_build_indirect(Sg_scatter_hold * schp, Sg_fd * sfp, int buff_size);
@@ -862,10 +863,9 @@ sg_fill_request_table(Sg_fd *sfp, sg_req_info_t *rinfo)
 		if (val >= SG_MAX_QUEUE)
 			break;
 		rinfo[val].req_state = srp->done + 1;
-		rinfo[val].problem =
-			srp->header.masked_status &
-			srp->header.host_status &
-			srp->header.driver_status;
+		rinfo[val].problem = srp->header.masked_status ||
+					     srp->header.host_status ||
+					     srp->header.driver_status;
 		if (srp->done)
 			rinfo[val].duration =
 				srp->header.duration;
@@ -1309,7 +1309,8 @@ sg_rq_end_io_usercontext(struct work_struct *work)
  * level when a command is completed (or has failed).
  */
 static enum rq_end_io_ret
-sg_rq_end_io(struct request *rq, blk_status_t status)
+sg_rq_end_io(struct request *rq, blk_status_t status,
+	     const struct io_comp_batch *iob)
 {
 	struct scsi_cmnd *scmd = blk_mq_rq_to_pdu(rq);
 	struct sg_request *srp = rq->end_io_data;
@@ -1434,7 +1435,7 @@ sg_alloc(struct scsi_device *scsidp)
 	int error;
 	u32 k;
 
-	sdp = kzalloc(sizeof(Sg_device), GFP_KERNEL);
+	sdp = kzalloc_obj(Sg_device);
 	if (!sdp) {
 		sdev_printk(KERN_WARNING, scsidp, "%s: kmalloc Sg_device "
 			    "failure\n", __func__);
@@ -1661,35 +1662,6 @@ MODULE_PARM_DESC(scatter_elem_sz, "scatter gather element "
 MODULE_PARM_DESC(def_reserved_size, "size of buffer reserved for each fd");
 MODULE_PARM_DESC(allow_dio, "allow direct I/O (default: 0 (disallow))");
 
-#ifdef CONFIG_SYSCTL
-#include <linux/sysctl.h>
-
-static const struct ctl_table sg_sysctls[] = {
-	{
-		.procname	= "sg-big-buff",
-		.data		= &sg_big_buff,
-		.maxlen		= sizeof(int),
-		.mode		= 0444,
-		.proc_handler	= proc_dointvec,
-	},
-};
-
-static struct ctl_table_header *hdr;
-static void register_sg_sysctls(void)
-{
-	if (!hdr)
-		hdr = register_sysctl("kernel", sg_sysctls);
-}
-
-static void unregister_sg_sysctls(void)
-{
-	unregister_sysctl_table(hdr);
-}
-#else
-#define register_sg_sysctls() do { } while (0)
-#define unregister_sg_sysctls() do { } while (0)
-#endif /* CONFIG_SYSCTL */
-
 static int __init
 init_sg(void)
 {
@@ -1699,10 +1671,6 @@ init_sg(void)
 		scatter_elem_sz = PAGE_SIZE;
 		scatter_elem_sz_prev = scatter_elem_sz;
 	}
-	if (def_reserved_size >= 0)
-		sg_big_buff = def_reserved_size;
-	else
-		def_reserved_size = sg_big_buff;
 
 	rc = register_chrdev_region(MKDEV(SCSI_GENERIC_MAJOR, 0), 
 				    SG_MAX_DEVS, "sg");
@@ -1714,7 +1682,6 @@ init_sg(void)
 	sg_sysfs_valid = 1;
 	rc = scsi_register_interface(&sg_interface);
 	if (0 == rc) {
-		register_sg_sysctls();
 #ifdef CONFIG_SCSI_PROC_FS
 		sg_proc_init();
 #endif				/* CONFIG_SCSI_PROC_FS */
@@ -1729,7 +1696,6 @@ err_out:
 static void __exit
 exit_sg(void)
 {
-	unregister_sg_sysctls();
 #ifdef CONFIG_SCSI_PROC_FS
 	remove_proc_subtree("scsi/sg", NULL);
 #endif				/* CONFIG_SCSI_PROC_FS */
@@ -1834,7 +1800,7 @@ sg_start_req(Sg_request *srp, unsigned char *cmd)
 	}
 
 	res = blk_rq_map_user_io(rq, md, hp->dxferp, hp->dxfer_len,
-			GFP_ATOMIC, iov_count, iov_count, 1, rw);
+			GFP_KERNEL, iov_count, iov_count, 1, rw);
 	if (!res) {
 		srp->bio = rq->bio;
 
@@ -2180,7 +2146,7 @@ sg_add_sfp(Sg_device * sdp)
 	unsigned long iflags;
 	int bufflen;
 
-	sfp = kzalloc(sizeof(*sfp), GFP_ATOMIC | __GFP_NOWARN);
+	sfp = kzalloc_obj(*sfp, GFP_ATOMIC | __GFP_NOWARN);
 	if (!sfp)
 		return ERR_PTR(-ENOMEM);
 
@@ -2205,10 +2171,8 @@ sg_add_sfp(Sg_device * sdp)
 	write_unlock_irqrestore(&sdp->sfd_lock, iflags);
 	SCSI_LOG_TIMEOUT(3, sg_printk(KERN_INFO, sdp,
 				      "sg_add_sfp: sfp=0x%p\n", sfp));
-	if (unlikely(sg_big_buff != def_reserved_size))
-		sg_big_buff = def_reserved_size;
 
-	bufflen = min_t(int, sg_big_buff,
+	bufflen = min_t(int, def_reserved_size,
 			max_sectors_bytes(sdp->device->request_queue));
 	sg_build_reserve(sfp, bufflen);
 	SCSI_LOG_TIMEOUT(3, sg_printk(KERN_INFO, sdp,
@@ -2436,7 +2400,7 @@ sg_proc_write_adio(struct file *filp, const char __user *buffer,
 
 static int sg_proc_single_open_dressz(struct inode *inode, struct file *file)
 {
-	return single_open(file, sg_proc_seq_show_int, &sg_big_buff);
+	return single_open(file, sg_proc_seq_show_int, &def_reserved_size);
 }
 
 static ssize_t 
@@ -2453,7 +2417,7 @@ sg_proc_write_dressz(struct file *filp, const char __user *buffer,
 	if (err)
 		return err;
 	if (k <= 1048576) {	/* limit "big buff" to 1 MB */
-		sg_big_buff = k;
+		def_reserved_size = k;
 		return count;
 	}
 	return -ERANGE;
@@ -2479,7 +2443,7 @@ struct sg_proc_deviter {
 
 static void * dev_seq_start(struct seq_file *s, loff_t *pos)
 {
-	struct sg_proc_deviter * it = kmalloc(sizeof(*it), GFP_KERNEL);
+	struct sg_proc_deviter * it = kmalloc_obj(*it);
 
 	s->private = it;
 	if (! it)
@@ -2626,7 +2590,7 @@ static int sg_proc_seq_show_debug(struct seq_file *s, void *v)
 
 	if (it && (0 == it->index))
 		seq_printf(s, "max_active_device=%d  def_reserved_size=%d\n",
-			   (int)it->max, sg_big_buff);
+			   (int)it->max, def_reserved_size);
 
 	read_lock_irqsave(&sg_index_lock, iflags);
 	sdp = it ? sg_lookup_dev(it->index) : NULL;

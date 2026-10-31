@@ -3,7 +3,7 @@
  * Copyright (C) 2018-2023 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -287,7 +287,6 @@ xrep_ibt_process_cluster(
 	struct xrep_ibt		*ri,
 	xfs_agblock_t		cluster_bno)
 {
-	struct xfs_imap		imap;
 	struct xfs_buf		*cluster_bp;
 	struct xfs_scrub	*sc = ri->sc;
 	struct xfs_mount	*mp = sc->mp;
@@ -305,10 +304,8 @@ xrep_ibt_process_cluster(
 	 * inobt because imap_to_bp directly maps the buffer without touching
 	 * either inode btree.
 	 */
-	imap.im_blkno = xfs_agbno_to_daddr(sc->sa.pag, cluster_bno);
-	imap.im_len = XFS_FSB_TO_BB(mp, igeo->blocks_per_cluster);
-	imap.im_boffset = 0;
-	error = xfs_imap_to_bp(mp, sc->tp, &imap, &cluster_bp);
+	error = xfs_read_icluster(sc->sa.pag, sc->tp, cluster_bno,
+			&cluster_bp);
 	if (error)
 		return error;
 
@@ -804,7 +801,7 @@ xrep_iallocbt(
 	if (!xfs_has_rmapbt(mp))
 		return -EOPNOTSUPP;
 
-	ri = kzalloc(sizeof(struct xrep_ibt), XCHK_GFP_FLAGS);
+	ri = kzalloc_obj(struct xrep_ibt, XCHK_GFP_FLAGS);
 	if (!ri)
 		return -ENOMEM;
 	ri->sc = sc;

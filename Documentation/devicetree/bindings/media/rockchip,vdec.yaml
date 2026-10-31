@@ -16,6 +16,7 @@ description: |-
 properties:
   compatible:
     oneOf:
+      - const: rockchip,rk3288-vdec
       - const: rockchip,rk3399-vdec
       - const: rockchip,rk3576-vdec
       - const: rockchip,rk3588-vdec
@@ -90,9 +91,8 @@ properties:
     maxItems: 1
 
   sram:
-    $ref: /schemas/types.yaml#/definitions/phandle
-    description: |
-      phandle to a reserved on-chip SRAM regions.
+    maxItems: 1
+    description:
       Some SoCs, like rk3588 provide on-chip SRAM to store temporary
       buffers during decoding.
 

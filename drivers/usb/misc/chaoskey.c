@@ -143,7 +143,7 @@ static int chaoskey_probe(struct usb_interface *interface,
 
 	/* Looks good, allocate and initialize */
 
-	dev = kzalloc(sizeof(struct chaoskey), GFP_KERNEL);
+	dev = kzalloc_obj(struct chaoskey);
 
 	if (dev == NULL)
 		goto out;
@@ -320,7 +320,6 @@ bail:
 	mutex_unlock(&dev->lock);
 destruction:
 	mutex_unlock(&chaoskey_list_lock);
-	usb_dbg(interface, "release success");
 	return rv;
 }
 

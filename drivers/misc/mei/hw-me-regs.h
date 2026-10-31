@@ -6,6 +6,8 @@
 #ifndef _MEI_HW_MEI_REGS_H_
 #define _MEI_HW_MEI_REGS_H_
 
+#include <linux/bits.h>
+
 /*
  * MEI device IDs
  */
@@ -125,6 +127,8 @@
 #define PCI_DEVICE_ID_INTEL_MEI_NVL_S      0x6E68  /* Nova Lake Point S */
 #define PCI_DEVICE_ID_INTEL_MEI_NVL_H      0xD370  /* Nova Lake Point H */
 
+#define PCI_DEVICE_ID_INTEL_MEI_CRI        0x6766  /* Crescent Island */
+
 /*
  * MEI HW Section
  */
@@ -135,10 +139,13 @@
 #  define PCI_CFG_HFS_1_OPMODE_MSK 0xf0000 /* OP MODE Mask: SPS <= 4.0 */
 #  define PCI_CFG_HFS_1_OPMODE_SPS 0xf0000 /* SPS SKU : SPS <= 4.0 */
 #define PCI_CFG_HFS_2         0x48
+#  define PCI_CFG_HFS_2_D3_BLOCK              BIT(7)
 #  define PCI_CFG_HFS_2_PM_CMOFF_TO_CMX_ERROR 0x1000000 /* CMoff->CMx wake after an error */
 #  define PCI_CFG_HFS_2_PM_CM_RESET_ERROR     0x5000000 /* CME reset due to exception */
 #  define PCI_CFG_HFS_2_PM_EVENT_MASK         0xf000000
 #define PCI_CFG_HFS_3         0x60
+#  define PCI_CFG_HFS_3_EXT_SKU_MSK  GENMASK(3, 0) /* IOE detection bits */
+#  define PCI_CFG_HFS_3_EXT_SKU_IOE  0x00000001
 #  define PCI_CFG_HFS_3_FW_SKU_MSK   0x00000070
 #  define PCI_CFG_HFS_3_FW_SKU_IGN   0x00000000
 #  define PCI_CFG_HFS_3_FW_SKU_SPS   0x00000060

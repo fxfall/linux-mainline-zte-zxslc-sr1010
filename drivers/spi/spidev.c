@@ -14,7 +14,6 @@
 #include <linux/err.h>
 #include <linux/list.h>
 #include <linux/errno.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/property.h>
@@ -214,7 +213,7 @@ static int spidev_message(struct spidev_data *spidev,
 	int			status = -EFAULT;
 
 	spi_message_init(&msg);
-	k_xfers = kcalloc(n_xfers, sizeof(*k_tmp), GFP_KERNEL);
+	k_xfers = kzalloc_objs(*k_tmp, n_xfers);
 	if (k_xfers == NULL)
 		return -ENOMEM;
 
@@ -686,6 +685,7 @@ static const struct class spidev_class = {
  */
 static const struct spi_device_id spidev_spi_ids[] = {
 	{ .name = /* abb */ "spi-sensor" },
+	{ .name = /* arduino */ "unoq-mcu" },
 	{ .name = /* cisco */ "spi-petra" },
 	{ .name = /* dh */ "dhcom-board" },
 	{ .name = /* elgin */ "jg10309-01" },
@@ -719,6 +719,7 @@ static int spidev_of_check(struct device *dev)
 
 static const struct of_device_id spidev_dt_ids[] = {
 	{ .compatible = "abb,spi-sensor", .data = &spidev_of_check },
+	{ .compatible = "arduino,unoq-mcu", .data = &spidev_of_check },
 	{ .compatible = "cisco,spi-petra", .data = &spidev_of_check },
 	{ .compatible = "dh,dhcom-board", .data = &spidev_of_check },
 	{ .compatible = "elgin,jg10309-01", .data = &spidev_of_check },
@@ -775,7 +776,7 @@ static int spidev_probe(struct spi_device *spi)
 	}
 
 	/* Allocate driver data */
-	spidev = kzalloc(sizeof(*spidev), GFP_KERNEL);
+	spidev = kzalloc_obj(*spidev);
 	if (!spidev)
 		return -ENOMEM;
 

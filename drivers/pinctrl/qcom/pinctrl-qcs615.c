@@ -43,7 +43,6 @@ static const char * const qcs615_tiles[] = {
 		.io_reg = 0x1000 * id + 0x4,		\
 		.intr_cfg_reg = 0x1000 * id + 0x8,	\
 		.intr_status_reg = 0x1000 * id + 0xc,	\
-		.intr_target_reg = 0x1000 * id + 0x8,	\
 		.tile = _tile,			\
 		.mux_bit = 2,			\
 		.pull_bit = 0,			\
@@ -70,7 +69,6 @@ static const char * const qcs615_tiles[] = {
 		.io_reg = 0,				\
 		.intr_cfg_reg = 0,			\
 		.intr_status_reg = 0,			\
-		.intr_target_reg = 0,			\
 		.tile = _tile,				\
 		.mux_bit = -1,				\
 		.pull_bit = pull,			\
@@ -96,7 +94,6 @@ static const char * const qcs615_tiles[] = {
 		.io_reg = offset + 0x4,			\
 		.intr_cfg_reg = 0,			\
 		.intr_status_reg = 0,			\
-		.intr_target_reg = 0,			\
 		.tile = WEST,				\
 		.mux_bit = -1,				\
 		.pull_bit = 3,				\
@@ -1076,6 +1073,7 @@ static const struct of_device_id qcs615_tlmm_of_match[] = {
 	},
 	{},
 };
+MODULE_DEVICE_TABLE(of, qcs615_tlmm_of_match);
 
 static int qcs615_tlmm_probe(struct platform_device *pdev)
 {
@@ -1104,4 +1102,3 @@ module_exit(qcs615_tlmm_exit);
 
 MODULE_DESCRIPTION("QTI QCS615 TLMM driver");
 MODULE_LICENSE("GPL");
-MODULE_DEVICE_TABLE(of, qcs615_tlmm_of_match);

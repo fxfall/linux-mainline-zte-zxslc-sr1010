@@ -6,7 +6,6 @@
 #include <linux/list.h>
 #include <linux/netfilter.h>
 #include <linux/netfilter/nfnetlink.h>
-#include <linux/netfilter/x_tables.h>
 #include <linux/netfilter/nf_tables.h>
 #include <linux/u64_stats_sync.h>
 #include <linux/rhashtable.h>
@@ -32,7 +31,9 @@ struct nft_pktinfo {
 	const struct nf_hook_state	*state;
 	u8				flags;
 	u8				tprot;
+	__be16				ethertype;
 	u16				fragoff;
+	u16				nhoff;
 	u16				thoff;
 	u16				inneroff;
 };
@@ -84,6 +85,8 @@ static inline void nft_set_pktinfo_unspec(struct nft_pktinfo *pkt)
 {
 	pkt->flags = 0;
 	pkt->tprot = 0;
+	pkt->ethertype = pkt->skb->protocol;
+	pkt->nhoff = 0;
 	pkt->thoff = 0;
 	pkt->fragoff = 0;
 }
@@ -121,17 +124,6 @@ struct nft_regs {
 		u32			data[NFT_REG32_NUM];
 		struct nft_verdict	verdict;
 	};
-};
-
-struct nft_regs_track {
-	struct {
-		const struct nft_expr		*selector;
-		const struct nft_expr		*bitwise;
-		u8				num_reg;
-	} regs[NFT_REG32_NUM];
-
-	const struct nft_expr			*cur;
-	const struct nft_expr			*last;
 };
 
 /* Store/load an u8, u16 or u64 integer to/from the u32 data register.
@@ -433,8 +425,6 @@ int nft_expr_clone(struct nft_expr *dst, struct nft_expr *src, gfp_t gfp);
 void nft_expr_destroy(const struct nft_ctx *ctx, struct nft_expr *expr);
 int nft_expr_dump(struct sk_buff *skb, unsigned int attr,
 		  const struct nft_expr *expr, bool reset);
-bool nft_expr_reduce_bitwise(struct nft_regs_track *track,
-			     const struct nft_expr *expr);
 
 struct nft_set_ext;
 
@@ -880,8 +870,6 @@ struct nft_elem_priv *nft_set_elem_init(const struct nft_set *set,
 					const u32 *key, const u32 *key_end,
 					const u32 *data,
 					u64 timeout, u64 expiration, gfp_t gfp);
-int nft_set_elem_expr_clone(const struct nft_ctx *ctx, struct nft_set *set,
-			    struct nft_expr *expr_array[]);
 void nft_set_elem_expr_destroy(const struct nft_ctx *ctx,
 			       struct nft_set_elem_expr *elem_expr);
 void nft_set_elem_destroy(const struct nft_set *set,
@@ -949,7 +937,6 @@ struct nft_offload_ctx;
  *	@destroy_clone: destruction clone function
  *	@dump: function to dump parameters
  *	@validate: validate expression, called during loop detection
- *	@reduce: reduce expression
  *	@gc: garbage collection expression
  *	@offload: hardware offload expression
  *	@offload_action: function to report true/false to allocate one slot or not in the flow
@@ -983,8 +970,6 @@ struct nft_expr_ops {
 						bool reset);
 	int				(*validate)(const struct nft_ctx *ctx,
 						    const struct nft_expr *expr);
-	bool				(*reduce)(struct nft_regs_track *track,
-						  const struct nft_expr *expr);
 	bool				(*gc)(struct net *net,
 					      const struct nft_expr *expr);
 	int				(*offload)(struct nft_offload_ctx *ctx,
@@ -1224,12 +1209,15 @@ struct nft_stats {
 	struct u64_stats_sync	syncp;
 };
 
+#define NFT_HOOK_REMOVE	(1 << 0)
+
 struct nft_hook {
 	struct list_head	list;
 	struct list_head	ops_list;
 	struct rcu_head		rcu;
 	char			ifname[IFNAMSIZ];
 	u8			ifnamelen;
+	u8			flags;
 };
 
 struct nf_hook_ops *nft_hook_find_ops(const struct nft_hook *hook,
@@ -1304,6 +1292,7 @@ static inline void nft_use_inc_restore(u32 *use)
  *	@sets: sets in the table
  *	@objects: stateful objects in the table
  *	@flowtables: flow tables in the table
+ *	@objname_ht: hashtable for objects lookup by name
  *	@hgenerator: handle generator state
  *	@handle: table handle
  *	@use: number of chain references to this table
@@ -1323,6 +1312,7 @@ struct nft_table {
 	struct list_head		sets;
 	struct list_head		objects;
 	struct list_head		flowtables;
+	struct rhltable			objname_ht;
 	u64				hgenerator;
 	u64				handle;
 	u32				use;
@@ -1410,7 +1400,7 @@ static inline void *nft_obj_data(const struct nft_object *obj)
 #define nft_expr_obj(expr)	*((struct nft_object **)nft_expr_priv(expr))
 
 struct nft_object *nft_obj_lookup(const struct net *net,
-				  const struct nft_table *table,
+				  struct nft_table *table,
 				  const struct nlattr *nla, u32 objtype,
 				  u8 genmask);
 
@@ -1685,6 +1675,16 @@ struct nft_trans {
 };
 
 /**
+ * struct nft_trans_hook - nf_tables hook update in transaction
+ * @list: used internally
+ * @hook: struct nft_hook with the device hook
+ */
+struct nft_trans_hook {
+	struct list_head		list;
+	struct nft_hook			*hook;
+};
+
+/**
  * struct nft_trans_binding - nf_tables object with binding support in transaction
  * @nft_trans:    base structure, MUST be first member
  * @binding_list: list of objects with possible bindings
@@ -1947,6 +1947,7 @@ struct nftables_pernet {
 	struct list_head	binding_list;
 	struct list_head	module_list;
 	struct list_head	notify_list;
+	struct list_head	set_update_list;
 	struct mutex		commit_mutex;
 	u64			table_handle;
 	u64			tstamp;
@@ -1965,22 +1966,6 @@ static inline struct nftables_pernet *nft_pernet(const struct net *net)
 static inline u64 nft_net_tstamp(const struct net *net)
 {
 	return nft_pernet(net)->tstamp;
-}
-
-#define __NFT_REDUCE_READONLY	1UL
-#define NFT_REDUCE_READONLY	(void *)__NFT_REDUCE_READONLY
-
-void nft_reg_track_update(struct nft_regs_track *track,
-			  const struct nft_expr *expr, u8 dreg, u8 len);
-void nft_reg_track_cancel(struct nft_regs_track *track, u8 dreg, u8 len);
-void __nft_reg_track_cancel(struct nft_regs_track *track, u8 dreg);
-
-static inline bool nft_reg_track_cmp(struct nft_regs_track *track,
-				     const struct nft_expr *expr, u8 dreg)
-{
-	return track->regs[dreg].selector &&
-	       track->regs[dreg].selector->ops == expr->ops &&
-	       track->regs[dreg].num_reg == 0;
 }
 
 #endif /* _NET_NF_TABLES_H */

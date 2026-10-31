@@ -1259,13 +1259,16 @@ struct ath10k {
 	struct {
 		/* protected by conf_mutex */
 		struct ath10k_fw_components utf_mode_fw;
+		u8 ftm_msgref;
 
 		/* protected by data_lock */
 		bool utf_monitor;
+		u32 data_pos;
+		u32 expected_seq;
+		u8 *eventdata;
 	} testmode;
 
 	struct {
-		struct gpio_led wifi_led;
 		struct led_classdev cdev;
 		char label[48];
 		u32 gpio_state_pin;

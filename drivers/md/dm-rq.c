@@ -301,7 +301,8 @@ static void dm_kill_unmapped_request(struct request *rq, blk_status_t error)
 }
 
 static enum rq_end_io_ret end_clone_request(struct request *clone,
-					    blk_status_t error)
+					    blk_status_t error,
+					    const struct io_comp_batch *iob)
 {
 	struct dm_rq_target_io *tio = clone->end_io_data;
 
@@ -461,7 +462,7 @@ static void dm_start_request(struct mapped_device *md, struct request *orig)
 }
 
 static int dm_mq_init_request(struct blk_mq_tag_set *set, struct request *rq,
-			      unsigned int hctx_idx, unsigned int numa_node)
+			      unsigned int hctx_idx, int numa_node)
 {
 	struct mapped_device *md = set->driver_data;
 	struct dm_rq_target_io *tio = blk_mq_rq_to_pdu(rq);

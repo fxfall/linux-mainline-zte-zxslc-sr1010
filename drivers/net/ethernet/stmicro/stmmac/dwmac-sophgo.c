@@ -8,7 +8,6 @@
 #include <linux/clk.h>
 #include <linux/module.h>
 #include <linux/property.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 
 #include "stmmac_platform.h"
@@ -29,7 +28,6 @@ static int sophgo_sg2044_dwmac_init(struct platform_device *pdev,
 	plat_dat->flags |= STMMAC_FLAG_SPH_DISABLE;
 	plat_dat->set_clk_tx_rate = stmmac_set_clk_tx_rate;
 	plat_dat->multicast_filter_bins = 0;
-	plat_dat->unicast_filter_entries = 1;
 
 	return 0;
 }

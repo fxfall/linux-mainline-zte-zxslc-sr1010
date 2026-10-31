@@ -7,8 +7,10 @@
 #include <linux/kthread.h>
 #include <linux/list.h>
 #include <linux/mutex.h>
+#include <linux/time64.h>
 #include <linux/types.h>
 
+#include "chan.h"
 #include "out.h"
 #include "ref.h"
 #include "regs.h"
@@ -18,43 +20,72 @@ struct device;
 struct regmap;
 struct zl3073x_dpll;
 
-/*
- * Hardware limits for ZL3073x chip family
+/* Per-operation poll timeouts */
+#define ZL_POLL_DF_READ_TIMEOUT_US	(25 * USEC_PER_MSEC)
+#define ZL_POLL_FREQ_MEAS_TIMEOUT_US	(50 * USEC_PER_MSEC)
+#define ZL_POLL_HWREG_TIMEOUT_US	(50 * USEC_PER_MSEC)
+#define ZL_POLL_MB_TIMEOUT_US		(30 * USEC_PER_MSEC)
+#define ZL_POLL_PHASE_ERR_TIMEOUT_US	(50 * USEC_PER_MSEC)
+#define ZL_POLL_PHASE_STEP_TIMEOUT_US	(3000 * USEC_PER_MSEC)
+#define ZL_POLL_TIE_WR_TIMEOUT_US	(1000 * USEC_PER_MSEC)
+#define ZL_POLL_TOD_RD_TIMEOUT_US	(30 * USEC_PER_MSEC)
+#define ZL_POLL_TOD_WR_TIMEOUT_US	(1000 * USEC_PER_MSEC)
+
+enum zl3073x_flags {
+	ZL3073X_FLAG_REF_PHASE_COMP_32_BIT,
+	ZL3073X_FLAG_DIE_TEMP_BIT,
+	ZL3073X_FLAGS_NBITS /* must be last */
+};
+
+#define __ZL3073X_FLAG(name)	BIT(ZL3073X_FLAG_ ## name ## _BIT)
+#define ZL3073X_FLAG_REF_PHASE_COMP_32	__ZL3073X_FLAG(REF_PHASE_COMP_32)
+#define ZL3073X_FLAG_DIE_TEMP		__ZL3073X_FLAG(DIE_TEMP)
+
+/**
+ * struct zl3073x_chip_info - chip variant identification
+ * @id: chip ID
+ * @num_channels: number of DPLL channels supported by this variant
+ * @flags: chip variant flags
  */
-#define ZL3073X_MAX_CHANNELS	5
-#define ZL3073X_NUM_REFS	10
-#define ZL3073X_NUM_OUTS	10
-#define ZL3073X_NUM_SYNTHS	5
-#define ZL3073X_NUM_INPUT_PINS	ZL3073X_NUM_REFS
-#define ZL3073X_NUM_OUTPUT_PINS	(ZL3073X_NUM_OUTS * 2)
-#define ZL3073X_NUM_PINS	(ZL3073X_NUM_INPUT_PINS + \
-				 ZL3073X_NUM_OUTPUT_PINS)
+struct zl3073x_chip_info {
+	u16		id;
+	u8		num_channels;
+	unsigned long	flags;
+};
 
 /**
  * struct zl3073x_dev - zl3073x device
  * @dev: pointer to device
  * @regmap: regmap to access device registers
+ * @info: detected chip info
  * @multiop_lock: to serialize multiple register operations
- * @chip_id: chip ID read from hardware
+ * @tie_lock: to serialize TIE write operations
+ * @phase_step_lock: to serialize output phase step operations
  * @ref: array of input references' invariants
  * @out: array of outs' invariants
  * @synth: array of synths' invariants
+ * @chan: array of DPLL channels' state
  * @dplls: list of DPLLs
  * @kworker: thread for periodic work
  * @work: periodic work
  * @clock_id: clock id of the device
+ * @out_step_time_mask: output step-time mask (device-global)
  * @phase_avg_factor: phase offset measurement averaging factor
+ * @freq_monitor: is frequency monitor enabled
  */
 struct zl3073x_dev {
-	struct device		*dev;
-	struct regmap		*regmap;
-	struct mutex		multiop_lock;
-	u16			chip_id;
+	struct device			*dev;
+	struct regmap			*regmap;
+	const struct zl3073x_chip_info	*info;
+	struct mutex			multiop_lock;
+	struct mutex			tie_lock;
+	struct mutex			phase_step_lock;
 
 	/* Invariants */
 	struct zl3073x_ref	ref[ZL3073X_NUM_REFS];
 	struct zl3073x_out	out[ZL3073X_NUM_OUTS];
 	struct zl3073x_synth	synth[ZL3073X_NUM_SYNTHS];
+	struct zl3073x_chan	chan[ZL3073X_MAX_CHANNELS];
 
 	/* DPLL channels */
 	struct list_head	dplls;
@@ -63,34 +94,24 @@ struct zl3073x_dev {
 	struct kthread_worker		*kworker;
 	struct kthread_delayed_work	work;
 
-	/* Devlink parameters */
+	/* Per-chip parameters */
 	u64			clock_id;
+	u16			out_step_time_mask;
 	u8			phase_avg_factor;
+	bool			freq_monitor;
 };
 
-struct zl3073x_chip_info {
-	const u16	*ids;
-	size_t		num_ids;
-	int		num_channels;
-};
-
-extern const struct zl3073x_chip_info zl30731_chip_info;
-extern const struct zl3073x_chip_info zl30732_chip_info;
-extern const struct zl3073x_chip_info zl30733_chip_info;
-extern const struct zl3073x_chip_info zl30734_chip_info;
-extern const struct zl3073x_chip_info zl30735_chip_info;
 extern const struct regmap_config zl3073x_regmap_config;
 
 struct zl3073x_dev *zl3073x_devm_alloc(struct device *dev);
-int zl3073x_dev_probe(struct zl3073x_dev *zldev,
-		      const struct zl3073x_chip_info *chip_info);
+int zl3073x_dev_probe(struct zl3073x_dev *zldev);
 
 int zl3073x_dev_start(struct zl3073x_dev *zldev, bool full);
 void zl3073x_dev_stop(struct zl3073x_dev *zldev);
 
 static inline u8 zl3073x_dev_phase_avg_factor_get(struct zl3073x_dev *zldev)
 {
-	return zldev->phase_avg_factor;
+	return READ_ONCE(zldev->phase_avg_factor);
 }
 
 int zl3073x_dev_phase_avg_factor_set(struct zl3073x_dev *zldev, u8 factor);
@@ -123,7 +144,8 @@ struct zl3073x_hwreg_seq_item {
 
 int zl3073x_mb_op(struct zl3073x_dev *zldev, unsigned int op_reg, u8 op_val,
 		  unsigned int mask_reg, u16 mask_val);
-int zl3073x_poll_zero_u8(struct zl3073x_dev *zldev, unsigned int reg, u8 mask);
+int zl3073x_poll_zero_u8(struct zl3073x_dev *zldev, unsigned int reg,
+			 u8 mask, unsigned int timeout_us);
 int zl3073x_read_u8(struct zl3073x_dev *zldev, unsigned int reg, u8 *val);
 int zl3073x_read_u16(struct zl3073x_dev *zldev, unsigned int reg, u16 *val);
 int zl3073x_read_u32(struct zl3073x_dev *zldev, unsigned int reg, u32 *val);
@@ -158,18 +180,7 @@ int zl3073x_ref_phase_offsets_update(struct zl3073x_dev *zldev, int channel);
 static inline bool
 zl3073x_dev_is_ref_phase_comp_32bit(struct zl3073x_dev *zldev)
 {
-	switch (zldev->chip_id) {
-	case 0x0E30:
-	case 0x0E93:
-	case 0x0E94:
-	case 0x0E95:
-	case 0x0E96:
-	case 0x0E97:
-	case 0x1F60:
-		return true;
-	default:
-		return false;
-	}
+	return zldev->info->flags & ZL3073X_FLAG_REF_PHASE_COMP_32;
 }
 
 static inline bool
@@ -211,21 +222,6 @@ zl3073x_output_pin_out_get(u8 id)
 }
 
 /**
- * zl3073x_dev_ref_ffo_get - get current fractional frequency offset
- * @zldev: pointer to zl3073x device
- * @index: input reference index
- *
- * Return: the latest measured fractional frequency offset
- */
-static inline s64
-zl3073x_dev_ref_ffo_get(struct zl3073x_dev *zldev, u8 index)
-{
-	const struct zl3073x_ref *ref = zl3073x_ref_state_get(zldev, index);
-
-	return zl3073x_ref_ffo_get(ref);
-}
-
-/**
  * zl3073x_dev_ref_freq_get - get input reference frequency
  * @zldev: pointer to zl3073x device
  * @index: input reference index
@@ -255,21 +251,6 @@ zl3073x_dev_ref_is_diff(struct zl3073x_dev *zldev, u8 index)
 	return zl3073x_ref_is_diff(ref);
 }
 
-/**
- * zl3073x_dev_ref_is_enabled - check if the given input reference is enabled
- * @zldev: pointer to zl3073x device
- * @index: input reference index
- *
- * Return: true if input refernce is enabled, false otherwise
- */
-static inline bool
-zl3073x_dev_ref_is_enabled(struct zl3073x_dev *zldev, u8 index)
-{
-	const struct zl3073x_ref *ref = zl3073x_ref_state_get(zldev, index);
-
-	return zl3073x_ref_is_enabled(ref);
-}
-
 /*
  * zl3073x_dev_ref_is_status_ok - check the given input reference status
  * @zldev: pointer to zl3073x device
@@ -286,22 +267,6 @@ zl3073x_dev_ref_is_status_ok(struct zl3073x_dev *zldev, u8 index)
 }
 
 /**
- * zl3073x_dev_synth_dpll_get - get DPLL ID the synth is driven by
- * @zldev: pointer to zl3073x device
- * @index: synth index
- *
- * Return: ID of DPLL the given synthetizer is driven by
- */
-static inline u8
-zl3073x_dev_synth_dpll_get(struct zl3073x_dev *zldev, u8 index)
-{
-	const struct zl3073x_synth *synth;
-
-	synth = zl3073x_synth_state_get(zldev, index);
-	return zl3073x_synth_dpll_get(synth);
-}
-
-/**
  * zl3073x_dev_synth_freq_get - get synth current freq
  * @zldev: pointer to zl3073x device
  * @index: synth index
@@ -315,22 +280,6 @@ zl3073x_dev_synth_freq_get(struct zl3073x_dev *zldev, u8 index)
 
 	synth = zl3073x_synth_state_get(zldev, index);
 	return zl3073x_synth_freq_get(synth);
-}
-
-/**
- * zl3073x_dev_synth_is_enabled - check if the given synth is enabled
- * @zldev: pointer to zl3073x device
- * @index: synth index
- *
- * Return: true if synth is enabled, false otherwise
- */
-static inline bool
-zl3073x_dev_synth_is_enabled(struct zl3073x_dev *zldev, u8 index)
-{
-	const struct zl3073x_synth *synth;
-
-	synth = zl3073x_synth_state_get(zldev, index);
-	return zl3073x_synth_is_enabled(synth);
 }
 
 /**
@@ -370,18 +319,16 @@ zl3073x_dev_out_is_enabled(struct zl3073x_dev *zldev, u8 index)
 }
 
 /**
- * zl3073x_dev_out_signal_format_get - get output signal format
+ * zl3073x_dev_out_is_stepped - check if output is in step-time mask
  * @zldev: pointer to zl3073x device
  * @index: output index
  *
- * Return: signal format of given output
+ * Return: true if output is affected by step-time operations
  */
-static inline u8
-zl3073x_dev_out_signal_format_get(struct zl3073x_dev *zldev, u8 index)
+static inline bool
+zl3073x_dev_out_is_stepped(struct zl3073x_dev *zldev, u8 index)
 {
-	const struct zl3073x_out *out = zl3073x_out_state_get(zldev, index);
-
-	return zl3073x_out_signal_format_get(out);
+	return !!(zldev->out_step_time_mask & BIT(index));
 }
 
 /**
@@ -404,6 +351,36 @@ u8 zl3073x_dev_out_dpll_get(struct zl3073x_dev *zldev, u8 index)
 
 	/* Return DPLL that drives the synth */
 	return zl3073x_synth_dpll_get(synth);
+}
+
+/**
+ * zl3073x_dev_output_pin_freq_get - get output pin frequency
+ * @zldev: pointer to zl3073x device
+ * @id: output pin id
+ *
+ * Computes the output pin frequency based on the synth frequency, output
+ * divisor, and signal format. For N-div formats, N-pin frequency is
+ * additionally divided by esync_n_period.
+ *
+ * Return: frequency of the given output pin in Hz
+ */
+static inline u32
+zl3073x_dev_output_pin_freq_get(struct zl3073x_dev *zldev, u8 id)
+{
+	const struct zl3073x_synth *synth;
+	const struct zl3073x_out *out;
+	u8 out_id;
+	u32 freq;
+
+	out_id = zl3073x_output_pin_out_get(id);
+	out = zl3073x_out_state_get(zldev, out_id);
+	synth = zl3073x_synth_state_get(zldev, zl3073x_out_synth_get(out));
+	freq = zl3073x_synth_freq_get(synth) / out->div;
+
+	if (zl3073x_out_is_ndiv(out) && zl3073x_is_n_pin(id))
+		freq /= out->esync_n_period;
+
+	return freq;
 }
 
 /**

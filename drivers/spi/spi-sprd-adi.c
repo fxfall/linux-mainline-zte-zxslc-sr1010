@@ -553,6 +553,12 @@ static int sprd_adi_probe(struct platform_device *pdev)
 			return -ENXIO;
 	} else {
 		switch (ret) {
+		case 0:
+			/*
+			 * Only reachable with CONFIG_HWSPINLOCK=n, where the
+			 * of_hwspin_lock_get_id() stub returns 0.
+			 */
+			fallthrough;
 		case -ENOENT:
 			dev_info(&pdev->dev, "no hardware spinlock supplied\n");
 			break;
@@ -566,7 +572,6 @@ static int sprd_adi_probe(struct platform_device *pdev)
 	if (sadi->data->wdg_rst)
 		sadi->data->wdg_rst(sadi);
 
-	ctlr->dev.of_node = pdev->dev.of_node;
 	ctlr->bus_num = pdev->id;
 	ctlr->num_chipselect = num_chipselect;
 	ctlr->flags = SPI_CONTROLLER_HALF_DUPLEX;

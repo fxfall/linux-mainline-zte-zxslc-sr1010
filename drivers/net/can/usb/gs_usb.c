@@ -674,7 +674,7 @@ static void gs_usb_receive_bulk_callback(struct urb *urb)
 		if (hf->flags & GS_CAN_FLAG_FD) {
 			skb = alloc_canfd_skb(netdev, &cfd);
 			if (!skb)
-				return;
+				goto resubmit_urb;
 
 			cfd->can_id = le32_to_cpu(hf->can_id);
 			cfd->len = data_length;
@@ -687,7 +687,7 @@ static void gs_usb_receive_bulk_callback(struct urb *urb)
 		} else {
 			skb = alloc_can_skb(netdev, &cf);
 			if (!skb)
-				return;
+				goto resubmit_urb;
 
 			cf->can_id = le32_to_cpu(hf->can_id);
 			can_frame_set_cc_len(cf, hf->can_dlc, dev->can.ctrlmode);
@@ -1182,12 +1182,25 @@ static int gs_can_close(struct net_device *netdev)
 	return 0;
 }
 
-static int gs_can_eth_ioctl(struct net_device *netdev, struct ifreq *ifr, int cmd)
+static int gs_can_hwtstamp_get(struct net_device *netdev,
+			       struct kernel_hwtstamp_config *cfg)
 {
 	const struct gs_can *dev = netdev_priv(netdev);
 
 	if (dev->feature & GS_CAN_FEATURE_HW_TIMESTAMP)
-		return can_eth_ioctl_hwts(netdev, ifr, cmd);
+		return can_hwtstamp_get(netdev, cfg);
+
+	return -EOPNOTSUPP;
+}
+
+static int gs_can_hwtstamp_set(struct net_device *netdev,
+			       struct kernel_hwtstamp_config *cfg,
+			       struct netlink_ext_ack *extack)
+{
+	const struct gs_can *dev = netdev_priv(netdev);
+
+	if (dev->feature & GS_CAN_FEATURE_HW_TIMESTAMP)
+		return can_hwtstamp_set(netdev, cfg, extack);
 
 	return -EOPNOTSUPP;
 }
@@ -1196,8 +1209,8 @@ static const struct net_device_ops gs_usb_netdev_ops = {
 	.ndo_open = gs_can_open,
 	.ndo_stop = gs_can_close,
 	.ndo_start_xmit = gs_can_start_xmit,
-	.ndo_change_mtu = can_change_mtu,
-	.ndo_eth_ioctl = gs_can_eth_ioctl,
+	.ndo_hwtstamp_get = gs_can_hwtstamp_get,
+	.ndo_hwtstamp_set = gs_can_hwtstamp_set,
 };
 
 static int gs_usb_set_identify(struct net_device *netdev, bool do_identify)
@@ -1552,12 +1565,12 @@ static int gs_usb_probe(struct usb_interface *intf,
 
 	if (icount > type_max(parent->channel_cnt)) {
 		dev_err(&intf->dev,
-			"Driver cannot handle more that %u CAN interfaces\n",
+			"Driver cannot handle more than %u CAN interfaces\n",
 			type_max(parent->channel_cnt));
 		return -EINVAL;
 	}
 
-	parent = kzalloc(struct_size(parent, canch, icount), GFP_KERNEL);
+	parent = kzalloc_flex(*parent, canch, icount);
 	if (!parent)
 		return -ENOMEM;
 

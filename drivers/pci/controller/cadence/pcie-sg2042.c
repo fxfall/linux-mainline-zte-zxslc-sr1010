@@ -6,7 +6,6 @@
  * Copyright (C) 2025 Chen Wang <unicorn_wang@outlook.com>
  */
 
-#include <linux/mod_devicetable.h>
 #include <linux/pci.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
@@ -48,6 +47,8 @@ static int sg2042_pcie_probe(struct platform_device *pdev)
 	bridge->child_ops = &sg2042_pcie_child_ops;
 
 	rc = pci_host_bridge_priv(bridge);
+	rc->quirk_broken_aspm_l0s = 1;
+	rc->quirk_broken_aspm_l1 = 1;
 	pcie = &rc->pcie;
 	pcie->dev = dev;
 

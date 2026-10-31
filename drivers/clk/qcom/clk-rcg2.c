@@ -489,7 +489,7 @@ static int clk_rcg2_determine_gp_rate(struct clk_hw *hw,
 	u64 parent_rate;
 
 	parent = clk_hw_get_parent(hw);
-	parent_rate = clk_get_rate(parent->clk);
+	parent_rate = clk_hw_get_rate(parent);
 	if (!parent_rate)
 		return -EINVAL;
 
@@ -1117,6 +1117,8 @@ static const struct frac_entry frac_table_pixel[] = {
 	{ 4, 9 },
 	{ 1, 1 },
 	{ 2, 3 },
+	{ 16, 35},
+	{ 4, 15},
 	{ }
 };
 
@@ -1650,7 +1652,7 @@ static int clk_rcg2_dfs_populate_freq_table(struct clk_rcg2 *rcg)
 	int i;
 
 	/* Allocate space for 1 extra since table is NULL terminated */
-	freq_tbl = kcalloc(MAX_PERF_LEVEL + 1, sizeof(*freq_tbl), GFP_KERNEL);
+	freq_tbl = kzalloc_objs(*freq_tbl, MAX_PERF_LEVEL + 1);
 	if (!freq_tbl)
 		return -ENOMEM;
 	rcg->freq_tbl = freq_tbl;

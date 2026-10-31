@@ -22,7 +22,6 @@ oneOf:
   - $ref: kontron,sl28-vpd.yaml
   - $ref: onie,tlv-layout.yaml
   - $ref: u-boot,env.yaml
-  - $ref: zte,sr1010-tags.yaml
 
 properties:
   compatible: true

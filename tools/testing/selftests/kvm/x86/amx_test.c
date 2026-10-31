@@ -69,15 +69,21 @@ static inline void __tileloadd(void *tile)
 		     : : "a"(tile), "d"(0));
 }
 
+static inline int tileloadd_safe(void *tile)
+{
+	return kvm_asm_safe(".byte 0xc4,0xe2,0x7b,0x4b,0x04,0x10",
+			    "a"(tile), "d"(0));
+}
+
 static inline void __tilerelease(void)
 {
 	asm volatile(".byte 0xc4, 0xe2, 0x78, 0x49, 0xc0" ::);
 }
 
-static inline void __xsavec(struct xstate *xstate, uint64_t rfbm)
+static inline void __xsavec(struct xstate *xstate, u64 rfbm)
 {
-	uint32_t rfbm_lo = rfbm;
-	uint32_t rfbm_hi = rfbm >> 32;
+	u32 rfbm_lo = rfbm;
+	u32 rfbm_hi = rfbm >> 32;
 
 	asm volatile("xsavec (%%rdi)"
 		     : : "D" (xstate), "a" (rfbm_lo), "d" (rfbm_hi)
@@ -142,6 +148,8 @@ static void __attribute__((__flatten__)) guest_code(struct tile_config *amx_cfg,
 						    struct tile_data *tiledata,
 						    struct xstate *xstate)
 {
+	int vector;
+
 	GUEST_ASSERT(this_cpu_has(X86_FEATURE_XSAVE) &&
 		     this_cpu_has(X86_FEATURE_OSXSAVE));
 	check_xtile_info();
@@ -195,17 +203,13 @@ static void __attribute__((__flatten__)) guest_code(struct tile_config *amx_cfg,
 	GUEST_ASSERT(rdmsr(MSR_IA32_XFD) == XFEATURE_MASK_XTILE_DATA);
 	set_tilecfg(amx_cfg);
 	__ldtilecfg(amx_cfg);
+
 	/* Trigger #NM exception */
-	__tileloadd(tiledata);
-	GUEST_SYNC(TEST_COMPARE_TILEDATA | TEST_SAVE_RESTORE);
+	vector = tileloadd_safe(tiledata);
+	__GUEST_ASSERT(vector == NM_VECTOR,
+		       "Wanted #NM on tileloadd with XFD[18]=1, got %s",
+		       ex_str(vector));
 
-	GUEST_DONE();
-}
-
-void guest_nm_handler(struct ex_regs *regs)
-{
-	/* Check if #NM is triggered by XFEATURE_MASK_XTILE_DATA */
-	GUEST_SYNC(TEST_SAVE_RESTORE);
 	GUEST_ASSERT(!(get_cr0() & X86_CR0_TS));
 	GUEST_ASSERT(rdmsr(MSR_IA32_XFD_ERR) == XFEATURE_MASK_XTILE_DATA);
 	GUEST_ASSERT(rdmsr(MSR_IA32_XFD) == XFEATURE_MASK_XTILE_DATA);
@@ -217,6 +221,11 @@ void guest_nm_handler(struct ex_regs *regs)
 	/* xfd=0, enable amx */
 	wrmsr(MSR_IA32_XFD, 0);
 	GUEST_SYNC(TEST_SAVE_RESTORE);
+
+	__tileloadd(tiledata);
+	GUEST_SYNC(TEST_COMPARE_TILEDATA | TEST_SAVE_RESTORE);
+
+	GUEST_DONE();
 }
 
 int main(int argc, char *argv[])
@@ -227,7 +236,7 @@ int main(int argc, char *argv[])
 	struct kvm_x86_state *state;
 	struct kvm_x86_state *tile_state = NULL;
 	int xsave_restore_size;
-	vm_vaddr_t amx_cfg, tiledata, xstate;
+	gva_t amx_cfg, tiledata, xstate;
 	struct ucall uc;
 	int ret;
 
@@ -253,19 +262,16 @@ int main(int argc, char *argv[])
 
 	vcpu_regs_get(vcpu, &regs1);
 
-	/* Register #NM handler */
-	vm_install_exception_handler(vm, NM_VECTOR, guest_nm_handler);
-
 	/* amx cfg for guest_code */
-	amx_cfg = vm_vaddr_alloc_page(vm);
+	amx_cfg = vm_alloc_page(vm);
 	memset(addr_gva2hva(vm, amx_cfg), 0x0, getpagesize());
 
 	/* amx tiledata for guest_code */
-	tiledata = vm_vaddr_alloc_pages(vm, 2);
+	tiledata = vm_alloc_pages(vm, 2);
 	memset(addr_gva2hva(vm, tiledata), rand() | 1, 2 * getpagesize());
 
 	/* XSAVE state for guest_code */
-	xstate = vm_vaddr_alloc_pages(vm, DIV_ROUND_UP(XSAVE_SIZE, PAGE_SIZE));
+	xstate = vm_alloc_pages(vm, DIV_ROUND_UP(XSAVE_SIZE, PAGE_SIZE));
 	memset(addr_gva2hva(vm, xstate), 0, PAGE_SIZE * DIV_ROUND_UP(XSAVE_SIZE, PAGE_SIZE));
 	vcpu_args_set(vcpu, 3, amx_cfg, tiledata, xstate);
 

@@ -488,7 +488,7 @@ static int l2tp_session_collision_add(struct l2tp_net *pn,
 		/* First collision. Allocate list to manage the collided sessions
 		 * and add the existing session to the list.
 		 */
-		clist = kmalloc(sizeof(*clist), GFP_ATOMIC);
+		clist = kmalloc_obj(*clist, GFP_ATOMIC);
 		if (!clist)
 			return -ENOMEM;
 
@@ -1296,7 +1296,7 @@ static int l2tp_xmit_core(struct l2tp_session *session, struct sk_buff *skb, uns
 			ret = NET_XMIT_DROP;
 			goto out_unlock;
 		}
-		uh->len = htons(udp_len);
+		udp_set_len_short(uh, udp_len);
 
 		/* Calculate UDP checksum if configured to do so */
 #if IS_ENABLED(CONFIG_IPV6)
@@ -1511,7 +1511,7 @@ static int l2tp_tunnel_sock_create(struct net *net,
 			memcpy(&ip6_addr.l2tp_addr, cfg->local_ip6,
 			       sizeof(ip6_addr.l2tp_addr));
 			ip6_addr.l2tp_conn_id = tunnel_id;
-			err = kernel_bind(sock, (struct sockaddr *)&ip6_addr,
+			err = kernel_bind(sock, (struct sockaddr_unsized *)&ip6_addr,
 					  sizeof(ip6_addr));
 			if (err < 0)
 				goto out;
@@ -1521,7 +1521,7 @@ static int l2tp_tunnel_sock_create(struct net *net,
 			       sizeof(ip6_addr.l2tp_addr));
 			ip6_addr.l2tp_conn_id = peer_tunnel_id;
 			err = kernel_connect(sock,
-					     (struct sockaddr *)&ip6_addr,
+					     (struct sockaddr_unsized *)&ip6_addr,
 					     sizeof(ip6_addr), 0);
 			if (err < 0)
 				goto out;
@@ -1538,7 +1538,7 @@ static int l2tp_tunnel_sock_create(struct net *net,
 			ip_addr.l2tp_family = AF_INET;
 			ip_addr.l2tp_addr = cfg->local_ip;
 			ip_addr.l2tp_conn_id = tunnel_id;
-			err = kernel_bind(sock, (struct sockaddr *)&ip_addr,
+			err = kernel_bind(sock, (struct sockaddr_unsized *)&ip_addr,
 					  sizeof(ip_addr));
 			if (err < 0)
 				goto out;
@@ -1546,7 +1546,7 @@ static int l2tp_tunnel_sock_create(struct net *net,
 			ip_addr.l2tp_family = AF_INET;
 			ip_addr.l2tp_addr = cfg->peer_ip;
 			ip_addr.l2tp_conn_id = peer_tunnel_id;
-			err = kernel_connect(sock, (struct sockaddr *)&ip_addr,
+			err = kernel_connect(sock, (struct sockaddr_unsized *)&ip_addr,
 					     sizeof(ip_addr), 0);
 			if (err < 0)
 				goto out;
@@ -1578,7 +1578,7 @@ int l2tp_tunnel_create(int fd, int version, u32 tunnel_id, u32 peer_tunnel_id,
 	if (cfg)
 		encap = cfg->encap;
 
-	tunnel = kzalloc(sizeof(*tunnel), GFP_KERNEL);
+	tunnel = kzalloc_obj(*tunnel);
 	if (!tunnel) {
 		err = -ENOMEM;
 		goto err;
@@ -1684,7 +1684,7 @@ int l2tp_tunnel_register(struct l2tp_tunnel *tunnel, struct net *net,
 			.encap_destroy = l2tp_udp_encap_destroy,
 		};
 
-		setup_udp_tunnel_sock(net, sock, &udp_cfg);
+		setup_udp_tunnel_sock(net, sock->sk, &udp_cfg);
 	}
 
 	sk->sk_allocation = GFP_ATOMIC;

@@ -32,8 +32,6 @@
 #define UEVENT_NUM_ENVP			64	/* number of env pointers */
 #define UEVENT_BUFFER_SIZE		2048	/* buffer for the variables */
 
-struct sk_buff;
-
 #ifdef CONFIG_UEVENT_HELPER
 /* path to the userspace helper executed on an event */
 extern char uevent_helper[];
@@ -111,7 +109,7 @@ struct kobject *kobject_get(struct kobject *kobj);
 struct kobject * __must_check kobject_get_unless_zero(struct kobject *kobj);
 void kobject_put(struct kobject *kobj);
 
-const void *kobject_namespace(const struct kobject *kobj);
+const struct ns_common *kobject_namespace(const struct kobject *kobj);
 void kobject_get_ownership(const struct kobject *kobj, kuid_t *uid, kgid_t *gid);
 char *kobject_get_path(const struct kobject *kobj, gfp_t flag);
 
@@ -120,7 +118,7 @@ struct kobj_type {
 	const struct sysfs_ops *sysfs_ops;
 	const struct attribute_group **default_groups;
 	const struct kobj_ns_type_operations *(*child_ns_type)(const struct kobject *kobj);
-	const void *(*namespace)(const struct kobject *kobj);
+	const struct ns_common *(*namespace)(const struct kobject *kobj);
 	void (*get_ownership)(const struct kobject *kobj, kuid_t *uid, kgid_t *gid);
 };
 
@@ -140,11 +138,78 @@ struct kset_uevent_ops {
 
 struct kobj_attribute {
 	struct attribute attr;
-	ssize_t (*show)(struct kobject *kobj, struct kobj_attribute *attr,
-			char *buf);
-	ssize_t (*store)(struct kobject *kobj, struct kobj_attribute *attr,
-			 const char *buf, size_t count);
+	__SYSFS_FUNCTION_ALTERNATIVE(
+		ssize_t (*show)(struct kobject *kobj, struct kobj_attribute *attr, char *buf);
+		ssize_t (*show_const)(struct kobject *kobj, const struct kobj_attribute *attr,
+				      char *buf);
+	);
+	__SYSFS_FUNCTION_ALTERNATIVE(
+		ssize_t (*store)(struct kobject *kobj, struct kobj_attribute *attr,
+				 const char *buf, size_t count);
+		ssize_t (*store_const)(struct kobject *kobj, const struct kobj_attribute *attr,
+				       const char *buf, size_t count);
+	);
 };
+
+typedef ssize_t __kobj_show_handler_const(struct kobject *kobj, const struct kobj_attribute *attr,
+					  char *buf);
+typedef ssize_t __kobj_store_handler_const(struct kobject *kobj, const struct kobj_attribute *attr,
+					   const char *buf, size_t count);
+
+#ifdef CONFIG_CFI
+
+#define __KOBJ_ATTR_SHOW_STORE(_show, _store)						\
+	.show		= _Generic(_show,						\
+			  __kobj_show_handler_const * : NULL,				\
+			  default : _show						\
+	),										\
+	.show_const	= _Generic(_show,						\
+			  __kobj_show_handler_const * : _show,				\
+			  default : NULL						\
+	),										\
+	.store		= _Generic(_store,						\
+			  __kobj_store_handler_const * : NULL,				\
+			  default : _store						\
+	),										\
+	.store_const	= _Generic(_store,						\
+			  __kobj_store_handler_const * : _store,			\
+			  default : NULL \
+	),
+
+#else
+
+#define __KOBJ_ATTR_SHOW_STORE(_show, _store)						\
+	.show		= _Generic(_show,						\
+			  __kobj_show_handler_const * : (void *)_show,			\
+			  default : _show						\
+	),										\
+	.store		= _Generic(_store,						\
+			  __kobj_store_handler_const * : (void *)_store,		\
+			  default : _store						\
+	),										\
+
+#endif
+
+#define __KOBJ_ATTR(_name, _mode, _show, _store) {			\
+	.attr	= { .name = __stringify(_name),				\
+		    .mode = VERIFY_OCTAL_PERMISSIONS(_mode) },		\
+	__KOBJ_ATTR_SHOW_STORE(_show, _store)				\
+}
+
+#define __KOBJ_ATTR_RO_MODE(_name, _mode)				\
+	__KOBJ_ATTR(_name, _mode, _name##_show, NULL)
+
+#define __KOBJ_ATTR_RO(_name)						\
+	__KOBJ_ATTR_RO_MODE(_name, 0444)
+
+#define __KOBJ_ATTR_RW_MODE(_name, _mode)				\
+	__KOBJ_ATTR(_name, _mode, _name##_show, _name##_store)
+
+#define __KOBJ_ATTR_WO(_name)						\
+	__KOBJ_ATTR(_name, 0200, NULL, _name##_store)
+
+#define __KOBJ_ATTR_RW(_name)						\
+	__KOBJ_ATTR(_name, 0644, _name##_show, _name##_store)
 
 extern const struct sysfs_ops kobj_sysfs_ops;
 
@@ -220,10 +285,5 @@ int kobject_synth_uevent(struct kobject *kobj, const char *buf, size_t count);
 
 __printf(2, 3)
 int add_uevent_var(struct kobj_uevent_env *env, const char *format, ...);
-
-int broadcast_uevent(struct sk_buff *skb, __u32 pid, __u32 group,
-		     gfp_t allocation);
-
-u64 uevent_next_seqnum(void);
 
 #endif /* _KOBJECT_H_ */

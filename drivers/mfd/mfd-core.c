@@ -111,7 +111,6 @@ static int mfd_match_of_node_to_dev(struct platform_device *pdev,
 				    struct device_node *np,
 				    const struct mfd_cell *cell)
 {
-#if IS_ENABLED(CONFIG_OF)
 	struct mfd_of_node_entry *of_entry;
 	u64 of_node_addr;
 
@@ -136,18 +135,16 @@ static int mfd_match_of_node_to_dev(struct platform_device *pdev,
 		return -EAGAIN;
 
 allocate_of_node:
-	of_entry = kzalloc(sizeof(*of_entry), GFP_KERNEL);
+	of_entry = kzalloc_obj(*of_entry);
 	if (!of_entry)
 		return -ENOMEM;
 
 	of_entry->dev = &pdev->dev;
-	of_entry->np = np;
+	of_entry->np = of_node_get(np);
 	scoped_guard(mutex, &mfd_of_node_mutex)
 		list_add_tail(&of_entry->list, &mfd_of_node_list);
 
-	of_node_get(np);
 	device_set_node(&pdev->dev, of_fwnode_handle(np));
-#endif
 	return 0;
 }
 
@@ -158,7 +155,6 @@ static int mfd_add_device(struct device *parent, int id,
 {
 	struct resource *res;
 	struct platform_device *pdev;
-	struct device_node *np = NULL;
 	struct mfd_of_node_entry *of_entry, *tmp;
 	bool disabled = false;
 	int ret = -ENOMEM;
@@ -178,7 +174,7 @@ static int mfd_add_device(struct device *parent, int id,
 	if (!pdev->mfd_cell)
 		goto fail_device;
 
-	res = kcalloc(cell->num_resources, sizeof(*res), GFP_KERNEL);
+	res = kzalloc_objs(*res, cell->num_resources);
 	if (!res)
 		goto fail_device;
 
@@ -196,7 +192,7 @@ static int mfd_add_device(struct device *parent, int id,
 		goto fail_res;
 
 	if (IS_ENABLED(CONFIG_OF) && parent->of_node && cell->of_compatible) {
-		for_each_child_of_node(parent->of_node, np) {
+		for_each_child_of_node_scoped(parent->of_node, np) {
 			if (of_device_is_compatible(np, cell->of_compatible)) {
 				/* Skip 'disabled' devices */
 				if (!of_device_is_available(np)) {
@@ -207,7 +203,6 @@ static int mfd_add_device(struct device *parent, int id,
 				ret = mfd_match_of_node_to_dev(pdev, np, cell);
 				if (ret == -EAGAIN)
 					continue;
-				of_node_put(np);
 				if (ret)
 					goto fail_alias;
 
